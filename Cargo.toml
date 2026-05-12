@@ -1,10 +1,10 @@
 [package]
 name = "ezer-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Official CLI tool for scaffolding and building WebAssembly plugins for Ezerdesk."
 license = "Apache-2.0"
-repository = "https://github.com/ezerdesk/ezer-cli"
+repository = "https://github.com/jorgehc1/ezer-cli"
 keywords = ["cli", "ezerdesk", "plugin", "wasm"]
 categories = ["command-line-utilities", "wasm"]
 
