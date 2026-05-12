@@ -1,0 +1,17 @@
+[package]
+name = "ezer-cli"
+version = "0.1.1"
+edition = "2024"
+description = "Official CLI tool for scaffolding and building WebAssembly plugins for Ezerdesk."
+license = "MIT"
+repository = "https://github.com/ezerdesk/ezer-cli"
+keywords = ["cli", "ezerdesk", "plugin", "wasm"]
+categories = ["command-line-utilities", "wasm"]
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+console = "0.16.3"
+indicatif = "0.18.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = "1.1.2"
