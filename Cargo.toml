@@ -2,11 +2,14 @@
 name = "ezer-cli"
 version = "0.1.3"
 edition = "2024"
+authors = ["Jorge <jorge@rfjsoftware.com>"]
 description = "Official CLI tool for scaffolding and building WebAssembly plugins for Ezerdesk."
 license = "Apache-2.0"
 repository = "https://github.com/jorgehc1/ezer-cli"
 keywords = ["cli", "ezerdesk", "plugin", "wasm"]
 categories = ["command-line-utilities", "wasm"]
+homepage = "https://rfjsoftware.com"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

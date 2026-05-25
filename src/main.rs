@@ -87,10 +87,12 @@ use sdk::{UiWidget, PluginEvent, PluginResponse, PluginMetadata, NavItem};
 #[sdk::main]
 fn main(event: PluginEvent) -> i32 {
     match event {
+        // 1. Metadatos: Define cómo aparece el plugin en la navegación lateral
         PluginEvent::GetMetadata => {
             let meta = PluginMetadata {
+                host: "ezerdesk".to_string(),
                 navigation: vec![NavItem {
-                    page_id: "main".to_string(),
+                    page_id: "dashboard".to_string(),
                     label: "Mi Plugin".to_string(),
                     icon: "rocket-line".to_string(),
                     category: "operaciones".to_string(),
@@ -99,25 +101,67 @@ fn main(event: PluginEvent) -> i32 {
             };
             sdk::to_host_response(&meta);
         }
+
+        // 2. Vistas de Módulo: Se dispara cuando el usuario entra a una página completa del plugin
         PluginEvent::PageRequest { page_id } => {
-            if page_id == "main" {
-                let response = PluginResponse {
-                    success: true,
-                    ui_widgets: vec![
-                        UiWidget::Card {
-                            title: "Hola desde Ezer-CLI (Diamond Edition)".to_string(),
-                            children: vec![
-                                UiWidget::Text { 
-                                    content: "Plugin generado con blindaje de memoria automático.".to_string(), 
-                                    style: "info".to_string() 
-                                }
-                            ]
-                        }
-                    ]
-                };
-                sdk::to_host_response(&response);
+            match page_id.as_str() {
+                "dashboard" => {
+                    let response = PluginResponse {
+                        success: true,
+                        ui_widgets: vec![
+                            UiWidget::Card {
+                                title: "Panel Principal del Módulo".to_string(),
+                                children: vec![
+                                    UiWidget::Text { 
+                                        content: "Bienvenido a la vista principal de tu plugin.".to_string(), 
+                                        style: "info".to_string() 
+                                    }
+                                ]
+                            }
+                        ]
+                    };
+                    sdk::to_host_response(&response);
+                },
+                _ => {}
             }
         }
+
+        // 3. Fragmentos de UI: Se dispara para inyectar UI en lugares específicos del Host
+        PluginEvent::GetUiFragments { location } => {
+            match location.as_str() {
+                // Seccion de "Configuración del Módulo" en el panel administrativo
+                "plugin_settings" => {
+                    let response = PluginResponse {
+                        success: true,
+                        ui_widgets: vec![
+                            UiWidget::Card {
+                                title: "Configuración Personalizada".to_string(),
+                                children: vec![
+                                    UiWidget::Text { 
+                                        content: "Ajusta los parámetros de funcionamiento de este módulo.".to_string(), 
+                                        style: "muted".to_string() 
+                                    },
+                                    UiWidget::Input {
+                                        label: "API Key de Servicio".to_string(),
+                                        name: "api_key".to_string(),
+                                        placeholder: "Ingresa tu llave...".to_string(),
+                                        value: "".to_string(),
+                                    }
+                                ]
+                            }
+                        ]
+                    };
+                    sdk::to_host_response(&response);
+                },
+                _ => {}
+            }
+        }
+
+        // 4. Acciones: Manejo de clics en botones y envíos de formularios
+        PluginEvent::PluginAction { action, data } => {
+            sdk::log(&format!("Acción recibida: {} con datos: {:?}", action, data));
+        }
+
         _ => {}
     }
 
