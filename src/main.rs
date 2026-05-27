@@ -11,12 +11,15 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
+use zeroize::Zeroize;
 
 static LOOKING_GLASS: Emoji<'_, '_> = Emoji("🔍 ", "");
 static ROCKET: Emoji<'_, '_> = Emoji("🚀 ", "");
 static PACKAGE: Emoji<'_, '_> = Emoji("📦 ", "");
 static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
 static CROSS_MARK: Emoji<'_, '_> = Emoji("❌ ", "");
+
+const SDK_VERSION: &str = env!("EZERDESK_SDK_VERSION");
 
 #[derive(Parser)]
 #[command(name = "ezer")]
@@ -80,14 +83,11 @@ fn main() {
 fn encrypt_key(key_bytes: &[u8; 32], password: &str) -> Result<String, String> {
     let mut rng = rand::thread_rng();
 
-    // Salt para PBKDF2
     let mut salt = [0u8; 16];
     rng.fill(&mut salt);
 
-    // Derivar clave de 32 bytes desde la contraseña
-    let derived: [u8; 32] = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), &salt, 100_000);
+    let mut derived: [u8; 32] = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), &salt, 100_000);
 
-    // Nonce para AES-GCM (12 bytes)
     let mut nonce_bytes = [0u8; 12];
     rng.fill(&mut nonce_bytes);
 
@@ -99,11 +99,12 @@ fn encrypt_key(key_bytes: &[u8; 32], password: &str) -> Result<String, String> {
         .encrypt(nonce, key_bytes.as_ref())
         .map_err(|_| "Error cifrando la clave.".to_string())?;
 
-    // Formato: salt[16] + nonce[12] + ciphertext
     let mut output = Vec::with_capacity(16 + 12 + ciphertext.len());
     output.extend_from_slice(&salt);
     output.extend_from_slice(&nonce_bytes);
     output.extend_from_slice(&ciphertext);
+
+    derived.zeroize();
 
     Ok(hex::encode(output))
 }
@@ -120,7 +121,7 @@ fn decrypt_key(encrypted_hex: &str, password: &str) -> Result<[u8; 32], String> 
     let nonce_bytes = &data[16..28];
     let ciphertext = &data[28..];
 
-    let derived: [u8; 32] = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), salt, 100_000);
+    let mut derived: [u8; 32] = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), salt, 100_000);
 
     let key = Key::<Aes256Gcm>::from_slice(&derived);
     let cipher = Aes256Gcm::new(key);
@@ -129,6 +130,8 @@ fn decrypt_key(encrypted_hex: &str, password: &str) -> Result<[u8; 32], String> 
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| "Contraseña incorrecta.".to_string())?;
+
+    derived.zeroize();
 
     let mut result = [0u8; 32];
     result.copy_from_slice(&plaintext);
@@ -190,7 +193,7 @@ crate-type = ["cdylib"]
 [dependencies]
 serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1.0"
-ezerdesk-sdk = "0.1.3"
+ezerdesk-sdk = "{SDK_VERSION}"
 "#
     );
     fs::write(path.join("Cargo.toml"), cargo_toml)
@@ -297,8 +300,14 @@ fn main(event: PluginEvent) -> i32 {
     let (priv_hex, pub_hex) = generate_keypair()?;
 
     // Solicitar contraseña para cifrar la clave privada
-    let password = prompt_password("🔐 Contraseña para proteger la clave de firma: ")?;
-    let confirm = prompt_password("🔐 Confirma la contraseña: ")?;
+    let mut password = match std::env::var("EZER_INIT_PASSWORD") {
+        Ok(p) => p,
+        Err(_) => prompt_password("🔐 Contraseña para proteger la clave de firma: ")?,
+    };
+    let confirm = match std::env::var("EZER_INIT_PASSWORD") {
+        Ok(_) => password.clone(),
+        Err(_) => prompt_password("🔐 Confirma la contraseña: ")?,
+    };
 
     if password != confirm {
         return Err("Las contraseñas no coinciden.".to_string());
@@ -310,6 +319,8 @@ fn main(event: PluginEvent) -> i32 {
     key_arr.copy_from_slice(&private_key_bytes);
 
     let encrypted = encrypt_key(&key_arr, &password)?;
+    key_arr.zeroize();
+    password.zeroize();
 
     fs::write(path.join(".ezer-key"), &encrypted)
         .map_err(|e| format!("No se pudo guardar la clave cifrada: {}", e))?;
@@ -325,7 +336,7 @@ fn main(event: PluginEvent) -> i32 {
         style(name).yellow()
     );
     println!("Prueba ejecutando: {} {}", style("cd").cyan(), name);
-    println!("Luego: {} {}", style("ezer").cyan(), "build");
+    println!("Luego: {} build", style("ezer").cyan());
     println!(
         "{} Clave pública: {}",
         style("🔑").bold(),
@@ -377,8 +388,9 @@ fn read_signing_key(cwd: &Path) -> Result<String, String> {
     };
 
     // Pedir contraseña
-    let password = prompt_password("🔐 Contraseña de la clave de firma: ")?;
+    let mut password = prompt_password("🔐 Contraseña de la clave de firma: ")?;
     let key_bytes = decrypt_key(&encrypted, &password)?;
+    password.zeroize();
     Ok(hex::encode(key_bytes))
 }
 
@@ -400,65 +412,58 @@ fn dev_server(port: u16) -> Result<(), String> {
     println!();
     println!("  {} Abriendo navegador...", style("→").bold());
 
-    // Abrir navegador
     let url = format!("http://localhost:{}", port);
     let _ = webbrowser::open(&url);
 
-    // Iniciar servidor HTTP
     let address = format!("127.0.0.1:{}", port);
-    let listener = std::net::TcpListener::bind(&address)
+    let server = tiny_http::Server::http(&address)
         .map_err(|e| format!("No se pudo iniciar el servidor en {}: {}", address, e))?;
 
     println!("  {} Servidor corriendo. Presiona Ctrl+C para detener.", style("✓").green());
 
-    use base64::Engine;
-    let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
-    let html = build_dev_html(&wasm_b64);
+    let html = include_str!("dev.html");
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-                    html.len(),
-                    html
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
+    for request in server.incoming_requests() {
+        let response = match request.url() {
+            "/plugin.wasm" => {
+                let resp = tiny_http::Response::from_data(wasm_bytes.clone())
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/wasm"[..])
+                            .unwrap(),
+                    );
+                request.respond(resp)
             }
-            Err(e) => {
-                eprintln!("Error en conexión: {}", e);
+            _ => {
+                let resp = tiny_http::Response::from_string(html)
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                            .unwrap(),
+                    );
+                request.respond(resp)
             }
+        };
+
+        if let Err(e) = response {
+            eprintln!("Error al responder: {}", e);
         }
     }
 
     Ok(())
 }
 
-fn build_dev_html(wasm_b64: &str) -> String {
-    let html = include_str!("dev.html");
-    html.replace("__WASM_BASE64__", wasm_b64)
-}
-
-fn curl_json(url: &str, method: &str, body: &str, jar: &Path) -> Result<String, String> {
-    let output = Command::new("curl")
-        .arg("-s")
-        .arg("-X").arg(method)
-        .arg("-H").arg("Content-Type: application/json")
-        .arg("--cookie-jar").arg(jar)
-        .arg("--cookie").arg(jar.to_str().unwrap_or(""))
-        .arg("-d").arg(body)
-        .arg(url)
-        .output()
-        .map_err(|e| format!("Error ejecutando curl: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    if output.status.success() {
-        Ok(stdout)
+fn http_request_json(client: &reqwest::blocking::Client, url: &str, method: &str, body: &str) -> Result<String, String> {
+    let req = match method {
+        "POST" => client.post(url).header("Content-Type", "application/json").body(body.to_string()),
+        "GET" => client.get(url),
+        _ => return Err(format!("Unsupported HTTP method: {}", method)),
+    };
+    let resp = req.send().map_err(|e| format!("Error en petición HTTP: {}", e))?;
+    let status = resp.status();
+    let text = resp.text().map_err(|e| format!("Error leyendo respuesta: {}", e))?;
+    if status.is_success() {
+        Ok(text)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let msg = if !stdout.is_empty() { stdout } else { stderr };
-        Err(msg)
+        Err(text)
     }
 }
 
@@ -550,60 +555,61 @@ fn publish_plugin(
     println!();
 
     // ── Autenticación ──────────────────────────────────────────────────────
-    let jar = cwd.join(".ezer-cookie-jar");
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(true)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
 
     let email = prompt("📧 Correo electrónico: ")?;
-    let password = prompt_password("🔑 Contraseña: ")?;
+    let mut password = prompt_password("🔑 Contraseña: ")?;
 
-    let login_body = serde_json::json!({"correo": email, "clave": password});
+    let login_body = serde_json::json!({"correo": email, "clave": &password});
     let login_json = serde_json::to_string(&login_body)
         .map_err(|_| "Error serializando login.".to_string())?;
 
+    password.zeroize();
+
     let login_url = format!("{}/api/v1/auth/login", base);
     println!("  → Iniciando sesión...");
-    let login_resp = curl_json(&login_url, "POST", &login_json, &jar)?;
+    let login_resp = http_request_json(&client, &login_url, "POST", &login_json)?;
 
     // Verificar si requiere MFA
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&login_resp) {
-        if json.get("status").and_then(|s| s.as_str()) == Some("mfa_required") {
-            let mfa_token = json["mfa_token"].as_str().unwrap_or("");
-            let code = prompt("🔐 Código OTP (6 dígitos): ")?;
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&login_resp)
+        && json.get("status").and_then(|s| s.as_str()) == Some("mfa_required")
+    {
+        let mfa_token = json["mfa_token"].as_str().unwrap_or("");
+        let code = prompt("🔐 Código OTP (6 dígitos): ")?;
 
-            let challenge_body = serde_json::json!({"code": code, "mfa_token": mfa_token});
-            let challenge_json = serde_json::to_string(&challenge_body)
-                .map_err(|_| "Error serializando MFA.".to_string())?;
+        let challenge_body = serde_json::json!({"code": code, "mfa_token": mfa_token});
+        let challenge_json = serde_json::to_string(&challenge_body)
+            .map_err(|_| "Error serializando MFA.".to_string())?;
 
-            let challenge_url = format!("{}/api/v1/auth/otp/challenge", base);
-            println!("  → Verificando OTP...");
-            curl_json(&challenge_url, "POST", &challenge_json, &jar)?;
-        }
+        let challenge_url = format!("{}/api/v1/auth/otp/challenge", base);
+        println!("  → Verificando OTP...");
+        http_request_json(&client, &challenge_url, "POST", &challenge_json)?;
     }
 
     // ── Subir plugin ───────────────────────────────────────────────────────
     let upload_url = format!("{}/api/v1/plugins/upload", base);
     println!("  → Subiendo plugin...");
 
-    let resp = curl_json(&upload_url, "POST", &upload_json, &jar)?;
+    let resp = http_request_json(&client, &upload_url, "POST", &upload_json)?;
 
     // Verificar respuesta
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
         if let Some(error) = json.get("error").and_then(|e| e.as_str()) {
             return Err(format!("El servidor rechazó el plugin: {}", error));
         }
-        if let Some(codigo) = json.get("codigo").and_then(|c| c.as_str()) {
-            if codigo == "VALIDACION_FALLIDA" {
-                if let Some(detalles) = json.get("detalles").and_then(|d| d.as_array()) {
-                    let msgs: Vec<String> = detalles.iter()
-                        .filter_map(|d| d.as_str().map(|s| s.to_string()))
-                        .collect();
-                    return Err(format!("Validación fallida:\n  • {}", msgs.join("\n  • ")));
-                }
-            }
+        if let Some(codigo) = json.get("codigo").and_then(|c| c.as_str())
+            && codigo == "VALIDACION_FALLIDA"
+            && let Some(detalles) = json.get("detalles").and_then(|d| d.as_array())
+        {
+            let msgs: Vec<String> = detalles.iter()
+                .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                .collect();
+            return Err(format!("Validación fallida:\n  • {}", msgs.join("\n  • ")));
         }
     }
-
-    // Limpiar cookie jar
-    let _ = fs::remove_file(&jar);
 
     println!("  {} Plugin publicado exitosamente!", style("✓").green());
     Ok(())
@@ -627,7 +633,7 @@ fn get_wasm_path(cwd: &Path) -> Result<std::path::PathBuf, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("Error al leer entrada: {}", e))?;
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "wasm") {
+        if path.extension().is_some_and(|ext| ext == "wasm") {
             return Ok(path);
         }
     }
@@ -801,6 +807,7 @@ mod tests {
 
     #[test]
     fn test_init_plugin_creates_files() {
+        unsafe { std::env::set_var("EZER_INIT_PASSWORD", "test-password") };
         let base = tmp_dir("init_creates_files");
         let result = init_plugin_at(&base, "test-plugin");
 
@@ -812,12 +819,12 @@ mod tests {
         let cargo = fs::read_to_string(plugin.join("Cargo.toml")).unwrap();
         assert!(cargo.contains(r#"name = "test-plugin""#));
         assert!(cargo.contains(r#"edition = "2021""#));
-        assert!(cargo.contains(r#"ezerdesk-sdk = "0.1.3""#));
+        assert!(cargo.contains(&format!(r#"ezerdesk-sdk = "{}""#, SDK_VERSION)));
 
         let lib = fs::read_to_string(plugin.join("src/lib.rs")).unwrap();
         assert!(lib.contains("#[sdk::main]"));
         assert!(lib.contains("PluginEvent::GetMetadata"));
-        assert!(lib.contains(r#"host: "ezerdesk""#));
+        assert!(lib.contains("NavItem::new"));
 
         let _ = fs::remove_dir_all(&base);
     }

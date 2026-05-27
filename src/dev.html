@@ -71,8 +71,6 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e
 </div>
 </div>
 <script>
-const WASM_BASE64 = "__WASM_BASE64__";
-
 function log(msg){
   var el=document.getElementById('log');
   el.textContent+=msg+'\n';
@@ -120,8 +118,10 @@ function renderWidget(w){
 
 async function loadAndRun(eventJson){
   try{
-    var bytes=Uint8Array.from(atob(WASM_BASE64),function(c){return c.charCodeAt(0);});
-    log('[WASM] Cargando plugin ('+bytes.length+' bytes)...');
+    log('[WASM] Cargando plugin...');
+    var wasmResponse=await fetch('/plugin.wasm');
+    var wasmBytes=await wasmResponse.arrayBuffer();
+    log('[WASM] Cargando plugin ('+wasmBytes.byteLength+' bytes)...');
 
     var publishFn=function(ptr,len){
       var mem=inst.exports.memory;
@@ -143,7 +143,7 @@ async function loadAndRun(eventJson){
       host_query:function(rp,rl,bp,bl){return 0;}
     }};
 
-    var result=await WebAssembly.instantiate(bytes,importObj);
+    var result=await WebAssembly.instantiate(wasmBytes,importObj);
     var inst=result.instance;
     log('[WASM] Plugin instanciado correctamente.');
 
