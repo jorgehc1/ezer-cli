@@ -195,6 +195,13 @@ crate-type = ["cdylib"]
 
 [workspace]
 
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
+
 [dependencies]
 serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1.0"
@@ -385,7 +392,6 @@ fn read_signing_key(cwd: &Path) -> Result<String, String> {
         .map_err(|e| format!("No se pudo leer {}: {}", key_path.display(), e))?;
     let encrypted = encrypted.trim().to_string();
 
-    // Si hay PLUGIN_SIGN_PASS, usarla sin preguntar (útil en CI/CD)
     // El .ezer-key.pub es solo referencia, podemos leerlo para mostrar info
     let _pub_info = if pub_key_path.exists() {
         fs::read_to_string(&pub_key_path).unwrap_or_default()
@@ -393,8 +399,11 @@ fn read_signing_key(cwd: &Path) -> Result<String, String> {
         String::new()
     };
 
-    // Pedir contraseña
-    let mut password = prompt_password("🔐 Contraseña de la clave de firma: ")?;
+    // Pedir contraseña (o usar PLUGIN_SIGN_PASS para CI/CD)
+    let mut password = match std::env::var("PLUGIN_SIGN_PASS") {
+        Ok(p) => p,
+        Err(_) => prompt_password("🔐 Contraseña de la clave de firma: ")?,
+    };
     let key_bytes = decrypt_key(&encrypted, &password)?;
     password.zeroize();
     Ok(hex::encode(key_bytes))
@@ -733,7 +742,7 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
     }
 
     println!(
-        "{} {}Compilando plugin para WebAssembly...",
+        "{} {} Compilando plugin para WebAssembly...",
         PACKAGE,
         style("Ezerdesk").bold().cyan()
     );
@@ -758,7 +767,7 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
 
     if output.status.success() {
         println!(
-            "{} {}Plugin compilado con éxito.",
+            "{} {} Plugin compilado con éxito.",
             SPARKLES,
             style("¡Listo!").green()
         );
@@ -769,14 +778,14 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
             Ok(key_hex) => {
                 sign_wasm_with_key(&wasm_path, &key_hex)?;
                 println!(
-                    "{} {}Plugin firmado automáticamente.",
+                    "{} {} Plugin firmado automáticamente.",
                     style("🔐").bold(),
                     style("Firma:").green()
                 );
             }
             Err(_) => {
                 println!(
-                    "{} {}No se encontró clave de firma. El plugin no está firmado.",
+                    "{} {} No se encontró clave de firma. El plugin no está firmado.",
                     style("⚠️").bold(),
                     style("Advertencia:").yellow()
                 );
@@ -787,8 +796,37 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
             }
         }
 
+        // Optimizar WASM post-compilación
+        let original_size = fs::metadata(&wasm_path).map(|m| m.len()).unwrap_or(0);
+
+        let opt_result = wasm_opt::OptimizationOptions::new_optimize_for_size_aggressively()
+            .enable_feature(wasm_opt::Feature::BulkMemory)
+            .run(&wasm_path, &wasm_path);
+
+        let final_size = fs::metadata(&wasm_path).map(|m| m.len()).unwrap_or(0);
+
+        match opt_result {
+            Ok(()) => {
+                let saved = original_size.saturating_sub(final_size);
+                println!(
+                    "  {} Optimizado: {} → {} ({} menos)",
+                    style("⚡").bold(),
+                    style(format_size(original_size)).dim(),
+                    style(format_size(final_size)).green(),
+                    style(format_size(saved)).dim()
+                );
+            }
+            Err(e) => {
+                println!(
+                    "  {} Error al optimizar WASM: {}",
+                    style("❌").bold(),
+                    e
+                );
+            }
+        }
+
         println!(
-            "{} {}Binario: {}",
+            "{} {} Binario: {}",
             LOOKING_GLASS,
             style("Archivo:").blue(),
             style(wasm_path.display()).yellow()
@@ -798,6 +836,16 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Fallo en la compilación:\n{}", stderr))
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
     }
 }
 
