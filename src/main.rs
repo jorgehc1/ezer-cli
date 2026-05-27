@@ -600,6 +600,7 @@ fn publish_plugin(
 
         let resp = client.post(&login_url)
             .header("Content-Type", "application/json")
+            .header("x-ezerdesk-request", "true")
             .body(login_json)
             .send()
             .map_err(|e| format!("Error en login: {}", e))?;
@@ -637,6 +638,7 @@ fn publish_plugin(
 
             let chal_resp = client.post(&challenge_url)
                 .header("Content-Type", "application/json")
+                .header("x-ezerdesk-request", "true")
                 .header("Cookie", &session_cookies)
                 .body(challenge_json)
                 .send()
@@ -664,6 +666,7 @@ fn publish_plugin(
         let req = match method {
             "POST" => client.post(url)
                 .header("Content-Type", "application/json")
+                .header("x-ezerdesk-request", "true")
                 .header("Cookie", &session_cookies)
                 .body(body.to_string()),
             "GET" => client.get(url)
