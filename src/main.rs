@@ -351,11 +351,6 @@ fn main(event: PluginEvent) -> i32 {
     println!("Prueba ejecutando: {} {}", style("cd").cyan(), name);
     println!("Luego: {} build", style("ezer").cyan());
     println!(
-        "{} Clave pública: {}",
-        style("🔑").bold(),
-        style(&pub_hex[..20]).dim()
-    );
-    println!(
         "{} La clave privada está cifrada con contraseña.",
         style("🔐").bold()
     );
@@ -832,22 +827,7 @@ fn sign_wasm_with_key(wasm_path: &Path, key_hex: &str) -> Result<(), String> {
         "{} Plugin firmado correctamente.",
         style("🔐").bold()
     );
-    println!("  {} Firma:        {}", style("📝").bold(), &signature_hex[..16]);
-    println!("  {} Clave pública: {}", style("🔑").bold(), &public_key_hex[..16]);
-    println!(
-        "  {} Archivo:      {}",
-        style("💾").bold(),
-        sig_path.display()
-    );
-
-    // Mostrar la clave pública para configurar en el servidor
-    println!();
-    println!(
-        "{} {}",
-        style("⚠️  IMPORTANTE:").yellow().bold(),
-        style("Agrega esta clave pública al .env del servidor:").yellow()
-    );
-    println!("  PLUGIN_PUBLIC_KEY={}", public_key_hex);
+    println!("  {} Archivo:      {}", style("💾").bold(), sig_path.display());
 
     Ok(())
 }
