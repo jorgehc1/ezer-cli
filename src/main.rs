@@ -230,7 +230,7 @@ fn main(event: PluginEvent) -> i32 {
                     .category("operaciones")
                     .priority(10))
                 .name("Mi Plugin")
-                .version("1.0.0");
+                .version(env!("CARGO_PKG_VERSION"));
             sdk::to_host_response(&meta);
         }
 
