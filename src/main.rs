@@ -466,22 +466,6 @@ fn dev_server(port: u16) -> Result<(), String> {
     Ok(())
 }
 
-fn http_request_json(client: &reqwest::blocking::Client, url: &str, method: &str, body: &str) -> Result<String, String> {
-    let req = match method {
-        "POST" => client.post(url).header("Content-Type", "application/json").body(body.to_string()),
-        "GET" => client.get(url),
-        _ => return Err(format!("Unsupported HTTP method: {}", method)),
-    };
-    let resp = req.send().map_err(|e| format!("Error en petición HTTP: {}", e))?;
-    let status = resp.status();
-    let text = resp.text().map_err(|e| format!("Error leyendo respuesta: {}", e))?;
-    if status.is_success() {
-        Ok(text)
-    } else {
-        Err(text)
-    }
-}
-
 fn read_plugin_manifest(cwd: &Path) -> Result<(String, String), String> {
     let cargo = fs::read_to_string(cwd.join("Cargo.toml"))
         .map_err(|e| format!("No se pudo leer Cargo.toml: {}", e))?;
@@ -587,38 +571,115 @@ fn publish_plugin(
 
     // ── Autenticación ──────────────────────────────────────────────────────
     let client = reqwest::blocking::Client::builder()
-        .cookie_store(true)
+        .cookie_store(false)
         .build()
         .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
 
-    let email = prompt("📧 Correo electrónico: ")?;
-    let mut password = prompt_password("🔑 Contraseña: ")?;
+    let session_path = cwd.join(".ezer-session");
+    let mut session_cookies = String::new();
 
-    let login_body = serde_json::json!({"correo": email, "clave": &password});
-    let login_json = serde_json::to_string(&login_body)
-        .map_err(|_| "Error serializando login.".to_string())?;
-
-    password.zeroize();
-
-    let login_url = format!("{}/api/v1/auth/login", base);
-    println!("  → Iniciando sesión...");
-    let login_resp = http_request_json(&client, &login_url, "POST", &login_json)?;
-
-    // Verificar si requiere MFA
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&login_resp)
-        && json.get("status").and_then(|s| s.as_str()) == Some("mfa_required")
-    {
-        let mfa_token = json["mfa_token"].as_str().unwrap_or("");
-        let code = prompt("🔐 Código OTP (6 dígitos): ")?;
-
-        let challenge_body = serde_json::json!({"code": code, "mfa_token": mfa_token});
-        let challenge_json = serde_json::to_string(&challenge_body)
-            .map_err(|_| "Error serializando MFA.".to_string())?;
-
-        let challenge_url = format!("{}/api/v1/auth/otp/challenge", base);
-        println!("  → Verificando OTP...");
-        http_request_json(&client, &challenge_url, "POST", &challenge_json)?;
+    // Intentar reusar sesión guardada
+    if let Ok(content) = fs::read_to_string(&session_path) {
+        session_cookies = content.trim().to_string();
+        println!("  → Usando sesión guardada...");
     }
+
+    // Si no hay sesión o falla, pedir login
+    if session_cookies.is_empty() {
+        let email = prompt("📧 Correo electrónico: ")?;
+        let mut password = prompt_password("🔑 Contraseña: ")?;
+
+        let login_body = serde_json::json!({"correo": email, "clave": &password});
+        let login_json = serde_json::to_string(&login_body)
+            .map_err(|_| "Error serializando login.".to_string())?;
+
+        password.zeroize();
+
+        let login_url = format!("{}/api/v1/auth/login", base);
+        println!("  → Iniciando sesión...");
+
+        let resp = client.post(&login_url)
+            .header("Content-Type", "application/json")
+            .body(login_json)
+            .send()
+            .map_err(|e| format!("Error en login: {}", e))?;
+
+        let status = resp.status();
+
+        // Guardar cookies de la sesión ANTES de consumir el body
+        let cookies: Vec<String> = resp.headers().get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap_or("").to_string())
+            .collect();
+        session_cookies = cookies.join("; ");
+
+        let login_resp_text = resp.text().map_err(|_| "Error leyendo respuesta".to_string())?;
+
+        if !status.is_success() {
+            return Err(format!("Login fallido: {}", login_resp_text));
+        }
+
+        let _ = fs::write(&session_path, &session_cookies);
+
+        // Verificar si requiere MFA
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&login_resp_text)
+            && json.get("status").and_then(|s| s.as_str()) == Some("mfa_required")
+        {
+            let mfa_token = json["mfa_token"].as_str().unwrap_or("");
+            let code = prompt("🔐 Código OTP (6 dígitos): ")?;
+
+            let challenge_body = serde_json::json!({"code": code, "mfa_token": mfa_token});
+            let challenge_json = serde_json::to_string(&challenge_body)
+                .map_err(|_| "Error serializando MFA.".to_string())?;
+
+            let challenge_url = format!("{}/api/v1/auth/otp/challenge", base);
+            println!("  → Verificando OTP...");
+
+            let chal_resp = client.post(&challenge_url)
+                .header("Content-Type", "application/json")
+                .header("Cookie", &session_cookies)
+                .body(challenge_json)
+                .send()
+                .map_err(|e| format!("Error en OTP: {}", e))?;
+
+            let chal_status = chal_resp.status();
+
+            // Actualizar cookies tras MFA (antes de consumir body)
+            let cookies: Vec<String> = chal_resp.headers().get_all(reqwest::header::SET_COOKIE)
+                .iter()
+                .map(|v| v.to_str().unwrap_or("").to_string())
+                .collect();
+            session_cookies = cookies.join("; ");
+
+            if !chal_status.is_success() {
+                return Err("Código OTP inválido".to_string());
+            }
+
+            let _ = fs::write(&session_path, &session_cookies);
+        }
+    }
+
+    // Helper para peticiones autenticadas
+    let auth_request = |url: &str, method: &str, body: &str| -> Result<String, String> {
+        let req = match method {
+            "POST" => client.post(url)
+                .header("Content-Type", "application/json")
+                .header("Cookie", &session_cookies)
+                .body(body.to_string()),
+            "GET" => client.get(url)
+                .header("Cookie", &session_cookies),
+            _ => return Err(format!("Unsupported method: {}", method)),
+        };
+        let resp = req.send().map_err(|e| format!("Error HTTP: {}", e))?;
+        let status = resp.status();
+        let text = resp.text().map_err(|_| "Error leyendo respuesta".to_string())?;
+
+        // Si 401, limpiar sesión para forzar login en próxima ejecución
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            let _ = fs::remove_file(&session_path);
+        }
+        if status.is_success() { Ok(text) } else { Err(text) }
+    };
 
     // ── Registrar clave pública de la organización ────────────────────────
     let pub_key_url = format!("{}/api/v1/auth/public-key", base);
@@ -627,7 +688,7 @@ fn publish_plugin(
     match clave_publica {
         Some(local_key) => {
             let existing_key =
-                http_request_json(&client, &pub_key_url, "GET", "").ok().and_then(
+                auth_request(&pub_key_url, "GET", "").ok().and_then(
                     |resp| {
                         serde_json::from_str::<serde_json::Value>(&resp).ok()
                             .and_then(|j| j["clave_publica"].as_str().map(|s| s.to_string()))
@@ -650,7 +711,7 @@ fn publish_plugin(
                     if should_update {
                         let reg_body =
                             serde_json::json!({"clave_publica": local_key}).to_string();
-                        http_request_json(&client, &reg_key_url, "POST", &reg_body)?;
+                        auth_request(&reg_key_url, "POST", &reg_body)?;
                         println!("  ✓ Clave pública actualizada.");
                     }
                 }
@@ -658,7 +719,7 @@ fn publish_plugin(
                     println!("  → Registrando clave pública de la organización...");
                     let reg_body =
                         serde_json::json!({"clave_publica": local_key}).to_string();
-                    http_request_json(&client, &reg_key_url, "POST", &reg_body)?;
+                    auth_request(&reg_key_url, "POST", &reg_body)?;
                     println!("  ✓ Clave pública registrada.");
                 }
             }
@@ -672,7 +733,7 @@ fn publish_plugin(
     let upload_url = format!("{}/api/v1/plugins/upload", base);
     println!("  → Subiendo plugin...");
 
-    let resp = http_request_json(&client, &upload_url, "POST", &upload_json)?;
+    let resp = auth_request(&upload_url, "POST", &upload_json)?;
 
     // Verificar respuesta
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
