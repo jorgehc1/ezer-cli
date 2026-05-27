@@ -15,10 +15,11 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e
 .sidebar button.active{background:#eef2ff;border-color:#818cf8;color:#4f46e5;font-weight:600}
 .sidebar .meta{margin-top:1rem;padding-top:1rem;border-top:1px solid #e2e8f0;font-size:.75rem;color:#94a3b8}
 .main{display:flex;flex-direction:column}
-.toolbar{padding:1rem 1.5rem;background:#fff;border-bottom:1px solid #e2e8f0;display:flex;gap:1rem;align-items:center}
+.toolbar{padding:1rem 1.5rem;background:#fff;border-bottom:1px solid #e2e8f0;display:flex;gap:1rem;align-items:center;flex-wrap:wrap}
 .toolbar label{font-size:.8rem;font-weight:600;color:#64748b}
 .toolbar button{padding:.5rem 1.25rem;background:#4f46e5;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:.85rem}
 .toolbar button:hover{background:#4338ca}
+.toolbar input,.toolbar select{padding:.4rem .75rem;border:1px solid #e2e8f0;border-radius:6px;font-size:.85rem}
 .content{flex:1;padding:1.5rem;overflow-y:auto}
 .widget{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:1rem;margin-bottom:1rem}
 .widget h3{font-size:.9rem;font-weight:700;margin-bottom:.75rem;color:#1e293b}
@@ -37,6 +38,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e
 .badge-danger{background:#fee2e2;color:#dc2626}
 .badge-info{background:#dbeafe;color:#2563eb}
 .log{background:#1e293b;color:#e2e8f0;font-family:monospace;font-size:.8rem;padding:.75rem;border-radius:6px;max-height:200px;overflow-y:auto;white-space:pre-wrap}
+.editor{width:100%;min-height:80px;padding:.5rem;border:1px solid #e2e8f0;border-radius:6px;font-family:monospace;font-size:.8rem;margin-bottom:.5rem}
 </style>
 </head>
 <body>
@@ -49,18 +51,21 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e
 <button onclick="sendEvent('plugin_action')">&#x26A1; PluginAction</button>
 <button onclick="sendEvent('ticket_created')">&#x1F3AB; TicketCreated</button>
 <div class="meta">
-<span id="plugin-name">Plugin: --</span>
-<span id="plugin-version">Version: --</span>
-<span id="plugin-author">Autor: --</span>
+<div id="plugin-name">Plugin: --</div>
+<div id="plugin-version">Version: --</div>
+<div id="plugin-author">Autor: --</div>
+<div id="build-status" style="margin-top:8px;font-weight:600">&#x1F7E2; Servidor activo</div>
 </div>
 </div>
 <div class="main">
 <div class="toolbar">
-<label>Parametros:</label>
-<span id="param-info" style="font-size:.85rem;color:#64748b">(sin parametros)</span>
-<div style="flex:1"></div>
-<input id="page-id-input" placeholder="page_id (default: dashboard)" style="padding:0.4rem 0.75rem;border:1px solid #e2e8f0;border-radius:6px;font-size:.85rem;width:200px">
-<button onclick="reloadPlugin()">&#x1F504; Recargar</button>
+<label>Payload JSON:</label>
+<textarea id="custom-payload" class="editor" placeholder='{"event_type":"custom_event","data":{"key":"value"}}'></textarea>
+<div style="display:flex;gap:.5rem;width:100%">
+<input id="page-id-input" placeholder="page_id (default: dashboard)" style="flex:1">
+<button onclick="sendCustom()">&#x1F680; Enviar</button>
+<button onclick="reloadPlugin()">&#x1F504; Recargar WASM</button>
+</div>
 </div>
 <div class="content" id="output"><div class="widget"><p style="color:#94a3b8">Cargando plugin...</p></div></div>
 <div class="toolbar" style="border-top:1px solid #e2e8f0;border-bottom:none">
@@ -71,6 +76,10 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e
 </div>
 </div>
 <script>
+var wasmInstance = null;
+var wasmExports = null;
+var lastRebuild = -1;
+
 function log(msg){
   var el=document.getElementById('log');
   el.textContent+=msg+'\n';
@@ -116,15 +125,15 @@ function renderWidget(w){
   return div;
 }
 
-async function loadAndRun(eventJson){
+async function loadPlugin(){
   try{
     log('[WASM] Cargando plugin...');
-    var wasmResponse=await fetch('/plugin.wasm');
+    var wasmResponse=await fetch('/plugin.wasm?'+Date.now());
     var wasmBytes=await wasmResponse.arrayBuffer();
-    log('[WASM] Cargando plugin ('+wasmBytes.byteLength+' bytes)...');
+    log('[WASM] Plugin ('+wasmBytes.byteLength+' bytes)');
 
     var publishFn=function(ptr,len){
-      var mem=inst.exports.memory;
+      var mem=wasmExports.memory;
       var buf=new Uint8Array(mem.buffer,ptr,len);
       var str=new TextDecoder().decode(buf);
       log('[Plugin] '+str);
@@ -132,6 +141,9 @@ async function loadAndRun(eventJson){
         var data=JSON.parse(str);
         if(data.ui_widgets) renderWidgets(data.ui_widgets,document.getElementById('output'));
         if(data.success!==undefined&&data.response) log('[Action] '+data.response);
+        if(data.name) document.getElementById('plugin-name').textContent='Plugin: '+data.name;
+        if(data.version) document.getElementById('plugin-version').textContent='Version: '+data.version;
+        if(data.author) document.getElementById('plugin-author').textContent='Autor: '+data.author;
       }catch(e){}
     };
 
@@ -144,30 +156,29 @@ async function loadAndRun(eventJson){
     }};
 
     var result=await WebAssembly.instantiate(wasmBytes,importObj);
-    var inst=result.instance;
-    log('[WASM] Plugin instanciado correctamente.');
+    wasmInstance=result.instance;
+    wasmExports=wasmInstance.exports;
+    log('[WASM] Plugin instanciado.');
 
-    function callEvent(eventJson){
-      var str=eventJson+'\x00';
-      var buf=new ArrayBuffer(str.length);
-      var view=new Uint8Array(buf);
-      for(var i=0;i<str.length;i++) view[i]=str.charCodeAt(i);
-      var ptr=inst.exports.alloc(buf.byteLength);
-      var mem=new Uint8Array(inst.exports.memory.buffer);
-      mem.set(new Uint8Array(buf),ptr);
-      inst.exports.on_event(ptr,str.length);
-    }
-
+    // Mostrar metadata
     callEvent(JSON.stringify({event_type:'get_metadata'}));
-
-    if(eventJson){
-      log('[Event] Enviando: '+eventJson);
-      callEvent(eventJson);
-    }
   }catch(e){
     log('[ERROR] '+e.message);
     document.getElementById('output').innerHTML='<div class="widget" style="border-color:#dc2626"><h3 style="color:#dc2626">Error</h3><p>'+esc(e.message)+'</p></div>';
   }
+}
+
+function callEvent(eventJson){
+  if(!wasmExports){
+    log('[ERROR] WASM no cargado');
+    return;
+  }
+  var buf=new TextEncoder().encode(eventJson);
+  var ptr=wasmExports.alloc(buf.length);
+  var mem=new Uint8Array(wasmExports.memory.buffer);
+  mem.set(buf,ptr);
+  wasmExports.on_event(ptr,buf.length);
+  log('[Event] Enviado: '+eventJson);
 }
 
 function sendEvent(type){
@@ -185,12 +196,36 @@ function sendEvent(type){
     case 'ticket_created':eventJson=JSON.stringify({event_type:'ticket.created',ticket:{id:'test',asunto:'Ticket de prueba',descripcion:'Test',estado:'abierto',prioridad:'media',id_organizacion:'org',id_departamento:'dept',id_solicitante:'user'}});break;
   }
   document.getElementById('output').innerHTML='<div class="widget"><p style="color:#94a3b8">Ejecutando...</p></div>';
-  loadAndRun(eventJson);
+  callEvent(eventJson);
 }
 
-function reloadPlugin(){location.reload();}
+function sendCustom(){
+  var payload=document.getElementById('custom-payload').value;
+  if(!payload.trim()) return;
+  callEvent(payload);
+}
 
-window.onload=function(){sendEvent('get_metadata');};
+function reloadPlugin(){loadPlugin();}
+
+// Polling: detectar rebuilds
+async function checkRebuild(){
+  try{
+    var r=await fetch('/status');
+    var d=await r.json();
+    if(d.rebuild>lastRebuild){
+      lastRebuild=d.rebuild;
+      document.getElementById('build-status').textContent='🔵 Reconstruido, recargando...';
+      await loadPlugin();
+      document.getElementById('build-status').textContent='🟢 Servidor activo';
+    }
+  }catch(e){}
+  setTimeout(checkRebuild,2000);
+}
+
+window.onload=function(){
+  loadPlugin();
+  checkRebuild();
+};
 </script>
 </body>
 </html>

@@ -409,8 +409,8 @@ fn dev_server(port: u16) -> Result<(), String> {
         .map_err(|e| format!("No se pudo leer el directorio actual: {}", e))?;
 
     let wasm_path = get_wasm_path(&cwd)?;
-    let wasm_bytes = fs::read(&wasm_path)
-        .map_err(|e| format!("No se pudo leer el .wasm: {}", e))?;
+    let src_dir = cwd.join("src");
+    let cargo_toml = cwd.join("Cargo.toml");
 
     println!(
         "{} {}Servidor de desarrollo",
@@ -420,25 +420,86 @@ fn dev_server(port: u16) -> Result<(), String> {
     println!("  Plugin:  {}", wasm_path.display());
     println!("  Puerto:  http://localhost:{}", port);
     println!();
-    println!("  {} Abriendo navegador...", style("→").bold());
 
-    let url = format!("http://localhost:{}", port);
-    let _ = webbrowser::open(&url);
+    // Contador de rebuilds compartido entre hilos
+    let rebuild_count: std::sync::Arc<std::sync::atomic::AtomicUsize> =
+        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rebuild_count_watcher = rebuild_count.clone();
+
+    // KV store en memoria
+    let kv_store: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    // Hilo: vigilar cambios y auto-rebuild
+    let cwd_clone = cwd.clone();
+    let wasm_path_clone = wasm_path.clone();
+    std::thread::spawn(move || {
+        use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+        let (watch_tx, watch_rx) = std::sync::mpsc::channel::<Result<Event, notify::Error>>();
+        if let Ok(mut watcher) = RecommendedWatcher::new(move |res| {
+            let _ = watch_tx.send(res);
+        }, Config::default()) {
+            let _ = watcher.watch(&src_dir, RecursiveMode::Recursive);
+            let _ = watcher.watch(&cargo_toml, RecursiveMode::NonRecursive);
+            loop {
+                match watch_rx.recv() {
+                    Ok(Ok(_)) => {
+                        // Pequeña pausa para evitar builds múltiples por un solo cambio
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        println!("  {} Cambio detectado, recompilando...", style("🔄").bold());
+                        let output = std::process::Command::new("cargo")
+                            .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
+                            .current_dir(&cwd_clone)
+                            .output();
+                        match output {
+                            Ok(out) if out.status.success() => {
+                                rebuild_count_watcher.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                println!("  {} Recompilación exitosa.", style("✓").green());
+                            }
+                            Ok(out) => {
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                eprintln!("  {} Error de compilación:\n{}", style("❌").bold(), stderr);
+                            }
+                            Err(e) => {
+                                eprintln!("  {} Error al ejecutar cargo: {}", style("❌").bold(), e);
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    });
 
     let address = format!("127.0.0.1:{}", port);
     let server = tiny_http::Server::http(&address)
         .map_err(|e| format!("No se pudo iniciar el servidor en {}: {}", address, e))?;
 
+    println!("  {} Abriendo navegador...", style("→").bold());
+    let url = format!("http://localhost:{}", port);
+    let _ = webbrowser::open(&url);
     println!("  {} Servidor corriendo. Presiona Ctrl+C para detener.", style("✓").green());
 
     let html = include_str!("dev.html");
 
     for request in server.incoming_requests() {
-        let response = match request.url() {
+        let url_path = request.url().split('?').next().unwrap_or("").to_string();
+        let response = match url_path.as_str() {
             "/plugin.wasm" => {
-                let resp = tiny_http::Response::from_data(wasm_bytes.clone())
+                let data = fs::read(&wasm_path).unwrap_or_default();
+                let resp = tiny_http::Response::from_data(data)
                     .with_header(
                         tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/wasm"[..])
+                            .unwrap(),
+                    );
+                request.respond(resp)
+            }
+            "/status" => {
+                let count = rebuild_count.load(std::sync::atomic::Ordering::SeqCst);
+                let body = format!("{{\"rebuild\":{}}}", count);
+                let resp = tiny_http::Response::from_string(body)
+                    .with_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                             .unwrap(),
                     );
                 request.respond(resp)
