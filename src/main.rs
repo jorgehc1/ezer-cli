@@ -20,10 +20,11 @@ static SPARKLES: Emoji<'_, '_> = Emoji("✨ ", "");
 static CROSS_MARK: Emoji<'_, '_> = Emoji("❌ ", "");
 
 const SDK_VERSION: &str = env!("EZERDESK_SDK_VERSION");
+const SDK_SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ezerdesk-sdk");
 
 #[derive(Parser)]
-#[command(name = "ezer")]
-#[command(about = "Ezerdesk Plugin CLI - Herramienta para automatizar la creación de plugins", long_about = None)]
+#[command(name = "ezer", version = "0.1.3")]
+#[command(about = "Ezerdesk Plugin CLI - © 2025 RFJ Software (https://rfjsoftware.com)")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -167,7 +168,7 @@ fn init_plugin(name: &str) -> Result<(), String> {
 
 fn init_plugin_at(base: &Path, name: &str) -> Result<(), String> {
     println!(
-        "{} {}Creando nuevo plugin: {}...",
+        "{} {} Creando nuevo plugin: {}...",
         SPARKLES,
         style("Ezerdesk").bold().cyan(),
         style(name).yellow()
@@ -181,6 +182,8 @@ fn init_plugin_at(base: &Path, name: &str) -> Result<(), String> {
     let src = path.join("src");
     fs::create_dir_all(&src).map_err(|e| format!("No se pudo crear 'src': {}", e))?;
 
+    let sdk_dep = detect_sdk_dependency(base);
+
     let cargo_toml = format!(
         r#"[package]
 name = "{name}"
@@ -190,11 +193,13 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[workspace]
+
 [dependencies]
 serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1.0"
 getrandom = {{ version = "0.2", features = ["js"] }}
-ezerdesk-sdk = "{SDK_VERSION}"
+{sdk_dep}
 "#
     );
     fs::write(path.join("Cargo.toml"), cargo_toml)
@@ -213,7 +218,7 @@ fn main(event: PluginEvent) -> i32 {
         //  📍 category: "operaciones" | "administracion" | "sistema"
         //  ════════════════════════════════════════════════════════════════
         PluginEvent::GetMetadata => {
-            let meta = sdk::metadata()
+            let meta = PluginMetadata::new()
                 .nav_item(NavItem::new("dashboard", "Mi Plugin", "rocket-line")
                     .category("operaciones")
                     .priority(10))
@@ -229,7 +234,7 @@ fn main(event: PluginEvent) -> i32 {
             match page_id.as_str() {
                 "dashboard" => {
                     sdk::respond(sdk::widgets![
-                        sdk::card("Panel Principal", [
+                        sdk::card("Panel Principal", vec![
                             sdk::text("Bienvenido a tu plugin.", "info")
                         ])
                     ]);
@@ -249,7 +254,7 @@ fn main(event: PluginEvent) -> i32 {
             match location.as_str() {
                 "plugin_settings" => {
                     sdk::respond(sdk::widgets![
-                        sdk::card("Configuración", [
+                        sdk::card("Configuración", vec![
                             sdk::text("Ajusta los parámetros del plugin.", "muted"),
                             sdk::input("API Key", "api_key", "Ingresa tu llave..."),
                         ])
@@ -331,7 +336,7 @@ fn main(event: PluginEvent) -> i32 {
         .map_err(|e| format!("No se pudo guardar la clave pública: {}", e))?;
 
     println!(
-        "{} {}Plugin {} listo para desarrollar!",
+        "{} {} Plugin {} listo para desarrollar!",
         ROCKET,
         style("Éxito:").green(),
         style(name).yellow()
@@ -616,6 +621,23 @@ fn publish_plugin(
     Ok(())
 }
 
+fn detect_sdk_dependency(_base: &Path) -> String {
+    let sdk_source = Path::new(SDK_SOURCE_DIR);
+    if sdk_source.join("Cargo.toml").exists() {
+        if let Ok(canonical) = sdk_source.canonicalize() {
+            return format!(
+                r#"ezerdesk-sdk = {{ version = "{}" }}
+
+[patch.crates-io]
+ezerdesk-sdk = {{ path = "{}" }}"#,
+                SDK_VERSION,
+                canonical.display()
+            );
+        }
+    }
+    format!(r#"ezerdesk-sdk = "{}""#, SDK_VERSION)
+}
+
 fn prompt(msg: &str) -> Result<String, String> {
     print!("{}", msg);
     let _ = std::io::stdout().flush();
@@ -820,7 +842,7 @@ mod tests {
         let cargo = fs::read_to_string(plugin.join("Cargo.toml")).unwrap();
         assert!(cargo.contains(r#"name = "test-plugin""#));
         assert!(cargo.contains(r#"edition = "2021""#));
-        assert!(cargo.contains(&format!(r#"ezerdesk-sdk = "{}""#, SDK_VERSION)));
+        assert!(cargo.contains(&format!(r#"ezerdesk-sdk"#)));
 
         let lib = fs::read_to_string(plugin.join("src/lib.rs")).unwrap();
         assert!(lib.contains("#[sdk::main]"));
