@@ -532,6 +532,19 @@ fn publish_plugin(
         None
     };
 
+    // Leer clave pública
+    let pub_key_path = cwd.join(".ezer-key.pub");
+    let clave_publica = if pub_key_path.exists() {
+        Some(
+            fs::read_to_string(&pub_key_path)
+                .map_err(|e| format!("No se pudo leer .ezer-key.pub: {}", e))?
+                .trim()
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
     // Codificar WASM a base64
     use base64::Engine;
     let codigo_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
@@ -546,6 +559,9 @@ fn publish_plugin(
     });
     if let Some(ref sig) = firma {
         upload_body["firma"] = serde_json::json!(sig);
+    }
+    if let Some(ref pub_key) = clave_publica {
+        upload_body["clave_publica"] = serde_json::json!(pub_key);
     }
     let upload_json = serde_json::to_string(&upload_body)
         .map_err(|e| format!("Error serializando JSON: {}", e))?;
@@ -602,6 +618,54 @@ fn publish_plugin(
         let challenge_url = format!("{}/api/v1/auth/otp/challenge", base);
         println!("  → Verificando OTP...");
         http_request_json(&client, &challenge_url, "POST", &challenge_json)?;
+    }
+
+    // ── Registrar clave pública de la organización ────────────────────────
+    let pub_key_url = format!("{}/api/v1/auth/public-key", base);
+    let reg_key_url = format!("{}/api/v1/auth/register-key", base);
+
+    match clave_publica {
+        Some(local_key) => {
+            let existing_key =
+                http_request_json(&client, &pub_key_url, "GET", "").ok().and_then(
+                    |resp| {
+                        serde_json::from_str::<serde_json::Value>(&resp).ok()
+                            .and_then(|j| j["clave_publica"].as_str().map(|s| s.to_string()))
+                    },
+                );
+
+            match existing_key {
+                Some(ref server_key) if server_key == &local_key => {
+                    println!("  ✓ Clave pública ya registrada, usando existente.");
+                }
+                Some(_) => {
+                    println!(
+                        "  ⚠ La clave pública local difiere de la registrada en el servidor."
+                    );
+                    print!("  ¿Actualizar clave pública? (s/n): ");
+                    let _ = std::io::stdout().flush();
+                    let mut input = String::new();
+                    let should_update = std::io::stdin().read_line(&mut input).is_ok()
+                        && input.trim().eq_ignore_ascii_case("s");
+                    if should_update {
+                        let reg_body =
+                            serde_json::json!({"clave_publica": local_key}).to_string();
+                        http_request_json(&client, &reg_key_url, "POST", &reg_body)?;
+                        println!("  ✓ Clave pública actualizada.");
+                    }
+                }
+                None => {
+                    println!("  → Registrando clave pública de la organización...");
+                    let reg_body =
+                        serde_json::json!({"clave_publica": local_key}).to_string();
+                    http_request_json(&client, &reg_key_url, "POST", &reg_body)?;
+                    println!("  ✓ Clave pública registrada.");
+                }
+            }
+        }
+        None => {
+            println!("  ⚠ No se encontró clave pública local (.ezer-key.pub). La firma no podrá verificarse.");
+        }
     }
 
     // ── Subir plugin ───────────────────────────────────────────────────────
