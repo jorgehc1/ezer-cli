@@ -313,6 +313,15 @@ fn main(event: PluginEvent) -> i32 {
     fs::write(src.join("lib.rs"), lib_rs)
         .map_err(|e| format!("No se pudo escribir src/lib.rs: {}", e))?;
 
+    // Crear imagen placeholder (plugin.png) — se reemplaza con la imagen real del plugin
+    use base64::Engine;
+    let placeholder_b64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMklEQVQ4T2NkYPj/n4EBBJgYKAQMFFnAxEBBA8aBpoAjQ4ECUUiRmYwUiIaIJAAAAP//wzYRkQKZQpZbAAAAAElFTkSuQmCC";
+    let placeholder_png = base64::engine::general_purpose::STANDARD
+        .decode(placeholder_b64)
+        .map_err(|_| "Error decodificando placeholder PNG".to_string())?;
+    fs::write(path.join("plugin.png"), &placeholder_png)
+        .map_err(|e| format!("No se pudo escribir plugin.png: {}", e))?;
+
     // Generar par de claves Ed25519 para firma automática
     let (priv_hex, pub_hex) = generate_keypair()?;
 
