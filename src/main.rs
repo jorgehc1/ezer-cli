@@ -234,6 +234,7 @@ fn main(event: PluginEvent) -> i32 {
                     .category("operaciones")
                     .priority(10))
                 .name("Mi Plugin")
+                .description("Describe brevemente qué hace tu plugin.")
                 .version(env!("CARGO_PKG_VERSION"));
             sdk::to_host_response(&meta);
         }
