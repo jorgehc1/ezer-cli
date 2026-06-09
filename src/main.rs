@@ -62,6 +62,10 @@ enum Commands {
         /// Si es de pago (default: false)
         #[arg(short = 'p', long)]
         es_pago: bool,
+
+        /// Ruta a una imagen (default: busca plugin.png en el directorio actual)
+        #[arg(short, long)]
+        imagen: Option<String>,
     },
 }
 
@@ -72,7 +76,7 @@ fn main() {
         Commands::Init { name } => init_plugin(&name),
         Commands::Build => build_plugin(),
         Commands::Dev { port } => dev_server(port),
-        Commands::Publish { server, token, precio, es_pago } => publish_plugin(server, token, precio, es_pago),
+        Commands::Publish { server, token, precio, es_pago, imagen } => publish_plugin(server, token, precio, es_pago, imagen),
     };
 
     if let Err(msg) = result {
@@ -547,6 +551,7 @@ fn publish_plugin(
     _token: Option<String>,
     precio: i64,
     es_pago: bool,
+    imagen: Option<String>,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("No se pudo leer el directorio actual: {}", e))?;
@@ -602,6 +607,35 @@ fn publish_plugin(
     }
     if let Some(ref pub_key) = clave_publica {
         upload_body["clave_publica"] = serde_json::json!(pub_key);
+    }
+
+    // Procesar imagen — por defecto busca plugin.png, o la ruta indicada con --image
+    let img_path = imagen.clone().unwrap_or_else(|| {
+        let default = cwd.join("plugin.png");
+        if default.exists() {
+            default.to_string_lossy().to_string()
+        } else {
+            String::new()
+        }
+    });
+    if !img_path.is_empty() {
+        let img_bytes = fs::read(&img_path)
+            .map_err(|e| format!("No se pudo leer la imagen '{}': {}", img_path, e))?;
+        let ext = img_path
+            .rsplit('.')
+            .next()
+            .unwrap_or("png")
+            .to_lowercase();
+        let mime = match ext.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+        let img_b64 = base64::engine::general_purpose::STANDARD.encode(&img_bytes);
+        println!("  {} Imagen adjunta: {} ({})", style("🖼").bold(), img_path, mime);
+        upload_body["imagen_base64"] = serde_json::json!(img_b64);
+        upload_body["imagen_tipo"] = serde_json::json!(mime);
     }
     let upload_json = serde_json::to_string(&upload_body)
         .map_err(|e| format!("Error serializando JSON: {}", e))?;
