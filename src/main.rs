@@ -55,9 +55,9 @@ enum Commands {
         #[arg(short = 't', long)]
         token: Option<String>,
 
-        /// Precio del plugin (default: 0.0)
-        #[arg(short, long, default_value = "0.0")]
-        precio: f64,
+        /// Precio del plugin en centavos (default: 0)
+        #[arg(short, long, default_value = "0")]
+        precio: i64,
 
         /// Si es de pago (default: false)
         #[arg(short = 'p', long)]
@@ -545,7 +545,7 @@ fn read_plugin_manifest(cwd: &Path) -> Result<(String, String), String> {
 fn publish_plugin(
     server: Option<String>,
     _token: Option<String>,
-    precio: f64,
+    precio: i64,
     es_pago: bool,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir()
