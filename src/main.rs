@@ -1,5 +1,6 @@
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use console::{style, Emoji};
 use ed25519_dalek::{Signer, SigningKey};
@@ -51,10 +52,6 @@ enum Commands {
         #[arg(short, long)]
         server: Option<String>,
 
-        /// Token CSRF (opcional, se puede leer de EZER_TOKEN)
-        #[arg(short = 't', long)]
-        token: Option<String>,
-
         /// Precio del plugin en centavos (default: 0)
         #[arg(short, long, default_value = "0")]
         precio: i64,
@@ -76,7 +73,7 @@ fn main() {
         Commands::Init { name } => init_plugin(&name),
         Commands::Build => build_plugin(),
         Commands::Dev { port } => dev_server(port),
-        Commands::Publish { server, token, precio, es_pago, imagen } => publish_plugin(server, token, precio, es_pago, imagen),
+        Commands::Publish { server, precio, es_pago, imagen } => publish_plugin(server, precio, es_pago, imagen),
     };
 
     if let Err(msg) = result {
@@ -315,7 +312,6 @@ fn main(event: PluginEvent) -> i32 {
         .map_err(|e| format!("No se pudo escribir src/lib.rs: {}", e))?;
 
     // Crear imagen placeholder (plugin.png) — se reemplaza con la imagen real del plugin
-    use base64::Engine;
     let placeholder_b64 = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAMklEQVQ4T2NkYPj/n4EBBJgYKAQMFFnAxEBBA8aBpoAjQ4ECUUiRmYwUiIaIJAAAAP//wzYRkQKZQpZbAAAAAElFTkSuQmCC";
     let placeholder_png = base64::engine::general_purpose::STANDARD
         .decode(placeholder_b64)
@@ -349,8 +345,18 @@ fn main(event: PluginEvent) -> i32 {
     key_arr.zeroize();
     password.zeroize();
 
-    fs::write(path.join(".ezer-key"), &encrypted)
-        .map_err(|e| format!("No se pudo guardar la clave cifrada: {}", e))?;
+    let key_path = path.join(".ezer-key");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    
+    options.open(&key_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, encrypted.as_bytes()))
+        .map_err(|e| format!("No se pudo guardar la clave cifrada en {}: {}", key_path.display(), e))?;
 
     // Guardar clave pública como referencia
     fs::write(path.join(".ezer-key.pub"), &pub_hex)
@@ -440,13 +446,8 @@ fn dev_server(port: u16) -> Result<(), String> {
         std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let rebuild_count_watcher = rebuild_count.clone();
 
-    // KV store en memoria
-    let kv_store: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
     // Hilo: vigilar cambios y auto-rebuild
     let cwd_clone = cwd.clone();
-    let wasm_path_clone = wasm_path.clone();
     std::thread::spawn(move || {
         use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
         let (watch_tx, watch_rx) = std::sync::mpsc::channel::<Result<Event, notify::Error>>();
@@ -460,6 +461,9 @@ fn dev_server(port: u16) -> Result<(), String> {
                     Ok(Ok(_)) => {
                         // Pequeña pausa para evitar builds múltiples por un solo cambio
                         std::thread::sleep(std::time::Duration::from_millis(500));
+                        // Vaciar eventos encolados durante el debounce
+                        while let Ok(_) = watch_rx.try_recv() {}
+
                         println!("  {} Cambio detectado, recompilando...", style("🔄").bold());
                         let output = std::process::Command::new("cargo")
                             .args(["build", "--target", "wasm32-unknown-unknown", "--release"])
@@ -500,13 +504,29 @@ fn dev_server(port: u16) -> Result<(), String> {
         let url_path = request.url().split('?').next().unwrap_or("").to_string();
         let response = match url_path.as_str() {
             "/plugin.wasm" => {
-                let data = fs::read(&wasm_path).unwrap_or_default();
-                let resp = tiny_http::Response::from_data(data)
-                    .with_header(
-                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/wasm"[..])
-                            .unwrap(),
-                    );
-                request.respond(resp)
+                let mut data = Vec::new();
+                for _ in 0..5 {
+                    if let Ok(content) = fs::read(&wasm_path) {
+                        if !content.is_empty() {
+                            data = content;
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+
+                if data.is_empty() {
+                    let resp = tiny_http::Response::from_string("WASM no disponible o en compilación.")
+                        .with_status_code(503);
+                    request.respond(resp)
+                } else {
+                    let resp = tiny_http::Response::from_data(data)
+                        .with_header(
+                            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/wasm"[..])
+                                .unwrap(),
+                        );
+                    request.respond(resp)
+                }
             }
             "/status" => {
                 let count = rebuild_count.load(std::sync::atomic::Ordering::SeqCst);
@@ -558,7 +578,6 @@ fn read_plugin_manifest(cwd: &Path) -> Result<(String, String), String> {
 
 fn publish_plugin(
     server: Option<String>,
-    _token: Option<String>,
     precio: i64,
     es_pago: bool,
     imagen: Option<String>,
@@ -601,7 +620,6 @@ fn publish_plugin(
     };
 
     // Codificar WASM a base64
-    use base64::Engine;
     let codigo_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
 
     // Construir JSON del upload
@@ -720,8 +738,6 @@ fn publish_plugin(
             return Err(format!("Login fallido: {}", login_resp_text));
         }
 
-        let _ = fs::write(&session_path, &session_cookies);
-
         // Verificar si requiere MFA
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&login_resp_text)
             && json.get("status").and_then(|s| s.as_str()) == Some("mfa_required")
@@ -756,9 +772,18 @@ fn publish_plugin(
             if !chal_status.is_success() {
                 return Err("Código OTP inválido".to_string());
             }
-
-            let _ = fs::write(&session_path, &session_cookies);
         }
+
+        // Guardar la sesión SOLO si todo el flujo (incluido MFA) fue exitoso, y con permisos estrictos
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let _ = options.open(&session_path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, session_cookies.as_bytes()));
     }
 
     // Helper para peticiones autenticadas
@@ -840,9 +865,6 @@ fn publish_plugin(
 
     // Verificar respuesta
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
-        if let Some(error) = json.get("error").and_then(|e| e.as_str()) {
-            return Err(format!("El servidor rechazó el plugin: {}", error));
-        }
         if let Some(codigo) = json.get("codigo").and_then(|c| c.as_str())
             && codigo == "VALIDACION_FALLIDA"
             && let Some(detalles) = json.get("detalles").and_then(|d| d.as_array())
@@ -851,6 +873,11 @@ fn publish_plugin(
                 .filter_map(|d| d.as_str().map(|s| s.to_string()))
                 .collect();
             return Err(format!("Validación fallida:\n  • {}", msgs.join("\n  • ")));
+        }
+
+        if let Some(error) = json.get("error").and_then(|e| e.as_str()) {
+            let codigo = json.get("codigo").and_then(|c| c.as_str()).unwrap_or("DESCONOCIDO");
+            return Err(format!("El servidor rechazó el plugin ({}): {}", codigo, error));
         }
     }
 
@@ -914,8 +941,6 @@ fn sign_wasm_with_key(wasm_path: &Path, key_hex: &str) -> Result<(), String> {
         .map_err(|_| "Error al convertir la clave.".to_string())?;
 
     let signing_key = SigningKey::from_bytes(&key_array);
-    let verifying_key = signing_key.verifying_key();
-    let public_key_hex = hex::encode(verifying_key.to_bytes());
 
     let wasm_bytes = fs::read(wasm_path)
         .map_err(|e| format!("No se pudo leer el .wasm: {}", e))?;

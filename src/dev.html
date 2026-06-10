@@ -147,12 +147,57 @@ async function loadPlugin(){
       }catch(e){}
     };
 
+    var devKvStore = {};
+
     var importObj={env:{
       host_publish_response:publishFn,
-      host_kv_set:function(kp,kl,vp,vl){},
-      host_kv_read:function(kp,kl,bp,bl){return 0;},
-      host_http_request:function(rp,rl,bp,bl){return 0;},
-      host_query:function(rp,rl,bp,bl){return 0;}
+      host_kv_set:function(kp,kl,vp,vl){
+        var mem = new Uint8Array(wasmExports.memory.buffer);
+        var key = new TextDecoder().decode(mem.subarray(kp, kp+kl));
+        var val = new TextDecoder().decode(mem.subarray(vp, vp+vl));
+        devKvStore[key] = val;
+        log('[KV Set] ' + key + ' = ' + esc(val));
+      },
+      host_kv_read:function(kp,kl,bp,bl){
+        var mem = new Uint8Array(wasmExports.memory.buffer);
+        var key = new TextDecoder().decode(mem.subarray(kp, kp+kl));
+        if (devKvStore[key] !== undefined) {
+          var valBytes = new TextEncoder().encode(devKvStore[key]);
+          if (valBytes.length <= bl) {
+            mem.set(valBytes, bp);
+            log('[KV Read] ' + key + ' (' + valBytes.length + ' bytes)');
+            return valBytes.length;
+          }
+        }
+        log('[KV Read] Not found: ' + key);
+        return 0;
+      },
+      host_http_request:function(rp,rl,bp,bl){
+        var mem = new Uint8Array(wasmExports.memory.buffer);
+        var reqStr = new TextDecoder().decode(mem.subarray(rp, rp+rl));
+        log('[HTTP] Request: ' + reqStr);
+        var mockRes = JSON.stringify({ status: 200, body: "{\"mock\":\"ok\"}", headers: {} });
+        var resBytes = new TextEncoder().encode(mockRes);
+        if (resBytes.length <= bl) {
+          mem.set(resBytes, bp);
+          return resBytes.length;
+        }
+        return 0;
+      },
+      host_query:function(rp,rl,bp,bl){
+        var mem = new Uint8Array(wasmExports.memory.buffer);
+        var query = new TextDecoder().decode(mem.subarray(rp, rp+rl));
+        log('[Query] ' + query);
+        var mockResult = '[]';
+        if(query.includes('tickets')) mockResult = '[{"id":1,"asunto":"Mock Ticket"}]';
+        if(query.includes('agents')) mockResult = '[{"id":1,"nombre":"Mock Agent"}]';
+        var resBytes = new TextEncoder().encode(mockResult);
+        if (resBytes.length <= bl) {
+          mem.set(resBytes, bp);
+          return resBytes.length;
+        }
+        return 0;
+      }
     }};
 
     var result=await WebAssembly.instantiate(wasmBytes,importObj);
@@ -166,6 +211,11 @@ async function loadPlugin(){
     log('[ERROR] '+e.message);
     document.getElementById('output').innerHTML='<div class="widget" style="border-color:#dc2626"><h3 style="color:#dc2626">Error</h3><p>'+esc(e.message)+'</p></div>';
   }
+}
+
+function pluginAction(action){
+  document.getElementById('output').innerHTML='<div class="widget"><p style="color:#94a3b8">Ejecutando acción...</p></div>';
+  callEvent(JSON.stringify({event_type:'plugin_action',action:action,data:{}}));
 }
 
 function callEvent(eventJson){
