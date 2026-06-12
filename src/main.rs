@@ -66,6 +66,47 @@ enum Commands {
     },
     /// Genera un par de claves (.ezer-key y .ezer-key.pub) en el directorio actual
     KeysGen,
+    /// Envía un plugin para revisión (cambia estado a "pendiente")
+    Submit {
+        /// ID del plugin a enviar para revisión
+        plugin_id: String,
+
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+    },
+    /// Aprove un plugin (solo Genesis/org admin)
+    Approve {
+        /// ID del plugin a aprobar
+        plugin_id: String,
+
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+
+        /// Slug personalizado para el marketplace (opcional)
+        #[arg(short, long)]
+        slug: Option<String>,
+    },
+    /// Rechaza un plugin con un motivo (solo Genesis/org admin)
+    Reject {
+        /// ID del plugin a rechazar
+        plugin_id: String,
+
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+
+        /// Motivo del rechazo
+        #[arg(short, long)]
+        motivo: String,
+    },
+    /// Lista plugins pendientes de revisión
+    Pending {
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+    },
 }
 
 fn main() {
@@ -83,6 +124,10 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
+        Commands::Submit { plugin_id, server } => submit_plugin(plugin_id, server),
+        Commands::Approve { plugin_id, server, slug } => approve_plugin(plugin_id, server, slug),
+        Commands::Reject { plugin_id, server, motivo } => reject_plugin(plugin_id, server, motivo),
+        Commands::Pending { server } => list_pending(server),
     };
 
     if let Err(msg) = result {
@@ -979,12 +1024,26 @@ fn sign_wasm_with_key(wasm_path: &Path, key_hex: &str) -> Result<(), String> {
     let wasm_bytes = fs::read(wasm_path)
         .map_err(|e| format!("No se pudo leer el .wasm: {}", e))?;
 
-    let signature = signing_key.sign(&wasm_bytes);
-    let signature_hex = hex::encode(signature.to_bytes());
+    // Generar timestamp (Unix seconds, 8 bytes big-endian)
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let timestamp_bytes = timestamp.to_be_bytes();
 
-    // Guardar la firma en un archivo junto al .wasm
+    // Firmar: timestamp ++ wasm_bytes
+    let mut payload = Vec::with_capacity(8 + wasm_bytes.len());
+    payload.extend_from_slice(&timestamp_bytes);
+    payload.extend_from_slice(&wasm_bytes);
+
+    let signature = signing_key.sign(&payload);
+    let signature_hex = hex::encode(signature.to_bytes());
+    let timestamp_hex = hex::encode(timestamp_bytes);
+
+    // Guardar como timestamp_hex:signature_hex
+    let sig_content = format!("{}:{}", timestamp_hex, signature_hex);
     let sig_path = wasm_path.with_extension("sig");
-    fs::write(&sig_path, &signature_hex)
+    fs::write(&sig_path, &sig_content)
         .map_err(|e| format!("No se pudo guardar la firma: {}", e))?;
 
     println!(
@@ -992,6 +1051,7 @@ fn sign_wasm_with_key(wasm_path: &Path, key_hex: &str) -> Result<(), String> {
         style("🔐").bold()
     );
     println!("  {} Archivo:      {}", style("💾").bold(), sig_path.display());
+    println!("  {} Timestamp:    Unix {}", style("⏰").bold(), timestamp);
 
     Ok(())
 }
@@ -1152,6 +1212,232 @@ fn wasm_target_installed() -> bool {
                 .any(|line| line.trim() == "wasm32-unknown-unknown")
         })
         .unwrap_or(false)
+}
+
+// ── Plugin Review Commands ──────────────────────────────────────────────────
+
+fn submit_plugin(plugin_id: String, server: Option<String>) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+
+    println!(
+        "{} Enviando plugin {} para revisión...",
+        ROCKET,
+        style(&plugin_id).cyan()
+    );
+
+    let session_path = std::env::current_dir()
+        .map_err(|e| format!("No se pudo leer directorio: {}", e))?
+        .join(".ezer-session");
+
+    let cookies = read_session(&session_path)?;
+    let url = format!("{}/api/v1/plugins/{}/submit", base, plugin_id);
+
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(false)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+
+    let resp = client.post(&url)
+        .header("Content-Type", "application/json")
+        .header("x-ezerdesk-request", "true")
+        .header("Cookie", &cookies)
+        .body("{}".to_string())
+        .send()
+        .map_err(|e| format!("Error HTTP: {}", e))?;
+
+    let status = resp.status();
+    let text = resp.text().map_err(|_| "Error leyendo respuesta".to_string())?;
+
+    if status.is_success() {
+        println!("{} Plugin enviado para revisión exitosamente.", style("✓").green());
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(msg) = json.get("mensaje").and_then(|m| m.as_str()) {
+                println!("  {}", msg);
+            }
+        }
+        Ok(())
+    } else {
+        Err(format!("Error {}: {}", status, text))
+    }
+}
+
+fn approve_plugin(plugin_id: String, server: Option<String>, slug: Option<String>) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+
+    println!(
+        "{} Aprobando plugin {}...",
+        style("✓").green(),
+        style(&plugin_id).cyan()
+    );
+
+    let session_path = std::env::current_dir()
+        .map_err(|e| format!("No se pudo leer directorio: {}", e))?
+        .join(".ezer-session");
+
+    let cookies = read_session(&session_path)?;
+    let url = format!("{}/api/v1/plugins/{}/approve", base, plugin_id);
+
+    let body = match slug {
+        Some(s) => serde_json::json!({"slug": s}).to_string(),
+        None => "{}".to_string(),
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(false)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+
+    let resp = client.post(&url)
+        .header("Content-Type", "application/json")
+        .header("x-ezerdesk-request", "true")
+        .header("Cookie", &cookies)
+        .body(body)
+        .send()
+        .map_err(|e| format!("Error HTTP: {}", e))?;
+
+    let status = resp.status();
+    let text = resp.text().map_err(|_| "Error leyendo respuesta".to_string())?;
+
+    if status.is_success() {
+        println!("{} Plugin aprobado y publicado en marketplace.", style("✓").green());
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(msg) = json.get("mensaje").and_then(|m| m.as_str()) {
+                println!("  {}", msg);
+            }
+        }
+        Ok(())
+    } else {
+        Err(format!("Error {}: {}", status, text))
+    }
+}
+
+fn reject_plugin(plugin_id: String, server: Option<String>, motivo: String) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+
+    println!(
+        "{} Rechazando plugin {}...",
+        CROSS_MARK,
+        style(&plugin_id).cyan()
+    );
+
+    let session_path = std::env::current_dir()
+        .map_err(|e| format!("No se pudo leer directorio: {}", e))?
+        .join(".ezer-session");
+
+    let cookies = read_session(&session_path)?;
+    let url = format!("{}/api/v1/plugins/{}/reject", base, plugin_id);
+
+    let body = serde_json::json!({"motivo": motivo}).to_string();
+
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(false)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+
+    let resp = client.post(&url)
+        .header("Content-Type", "application/json")
+        .header("x-ezerdesk-request", "true")
+        .header("Cookie", &cookies)
+        .body(body)
+        .send()
+        .map_err(|e| format!("Error HTTP: {}", e))?;
+
+    let status = resp.status();
+    let text = resp.text().map_err(|_| "Error leyendo respuesta".to_string())?;
+
+    if status.is_success() {
+        println!("{} Plugin rechazado.", style("✓").green());
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(msg) = json.get("mensaje").and_then(|m| m.as_str()) {
+                println!("  {}", msg);
+            }
+        }
+        Ok(())
+    } else {
+        Err(format!("Error {}: {}", status, text))
+    }
+}
+
+fn list_pending(server: Option<String>) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+
+    println!("{} Listando plugins pendientes de revisión...", LOOKING_GLASS);
+
+    let session_path = std::env::current_dir()
+        .map_err(|e| format!("No se pudo leer directorio: {}", e))?
+        .join(".ezer-session");
+
+    let cookies = read_session(&session_path)?;
+    let url = format!("{}/api/v1/plugins/all", base);
+
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(false)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+
+    let resp = client.get(&url)
+        .header("Cookie", &cookies)
+        .send()
+        .map_err(|e| format!("Error HTTP: {}", e))?;
+
+    let status = resp.status();
+    let text = resp.text().map_err(|_| "Error leyendo respuesta".to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("Error {}: {}", status, text));
+    }
+
+    let plugins: Vec<serde_json::Value> = serde_json::from_str(&text)
+        .map_err(|e| format!("Error parseando JSON: {}", e))?;
+
+    let pending: Vec<&serde_json::Value> = plugins.iter()
+        .filter(|p| p.get("estado_revision").and_then(|s| s.as_str()) == Some("pendiente"))
+        .collect();
+
+    if pending.is_empty() {
+        println!("  No hay plugins pendientes de revisión.");
+    } else {
+        println!("  {} plugins pendientes:", pending.len());
+        println!();
+        for p in &pending {
+            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let name = p.get("nombre").and_then(|v| v.as_str()).unwrap_or("?");
+            let version = p.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+            let verified = p.get("firma_verificada").and_then(|v| v.as_bool()).unwrap_or(false);
+            let verified_str = if verified { "✓" } else { "—" };
+            println!(
+                "  {} {} v{} [firma: {}]",
+                style(name).cyan(),
+                style(id).dim(),
+                style(version).yellow(),
+                verified_str
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn read_session(session_path: &Path) -> Result<String, String> {
+    if session_path.exists() {
+        fs::read_to_string(session_path)
+            .map(|c| c.trim().to_string())
+            .map_err(|e| format!("No se pudo leer sesión: {}", e))
+    } else {
+        Err("No hay sesión guardada. Ejecuta 'ezer publish' primero para autenticarte.".to_string())
+    }
 }
 
 #[cfg(test)]
