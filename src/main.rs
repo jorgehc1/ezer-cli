@@ -53,6 +53,10 @@ enum Commands {
         #[arg(short = 'p', long)]
         es_pago: bool,
 
+        /// Publicar activado (default: true)
+        #[arg(long, default_value = "true")]
+        activo: bool,
+
         /// Ruta a una imagen (default: busca plugin.png en el directorio actual)
         #[arg(short, long)]
         imagen: Option<String>,
@@ -107,7 +111,7 @@ fn main() {
         Commands::Init { name } => init_plugin(&name),
         Commands::Build => build_plugin(),
         Commands::Dev { port } => dev_server(port),
-        Commands::Publish { server, precio, es_pago, imagen } => publish_plugin(server, precio, es_pago, imagen),
+        Commands::Publish { server, precio, es_pago, activo, imagen } => publish_plugin(server, precio, es_pago, activo, imagen),
         Commands::Submit { plugin_id, server } => submit_plugin(plugin_id, server),
         Commands::Approve { plugin_id, server, slug } => approve_plugin(plugin_id, server, slug),
         Commands::Reject { plugin_id, server, motivo } => reject_plugin(plugin_id, server, motivo),
@@ -458,6 +462,7 @@ fn publish_plugin(
     server: Option<String>,
     precio: i64,
     es_pago: bool,
+    activo: bool,
     imagen: Option<String>,
 ) -> Result<(), String> {
     let cwd = std::env::current_dir()
@@ -481,6 +486,7 @@ fn publish_plugin(
         "codigo_wasm_base64": codigo_b64,
         "precio": precio,
         "es_pago": es_pago,
+        "activo": activo,
     });
 
     // Procesar imagen — por defecto busca plugin.png, o la ruta indicada con --image
