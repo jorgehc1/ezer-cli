@@ -1,18 +1,11 @@
-use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
-use aes_gcm::aead::Aead;
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use console::{style, Emoji};
-use ed25519_dalek::SigningKey;
 use indicatif::{ProgressBar, ProgressStyle};
-use pbkdf2::pbkdf2_hmac_array;
-use rand::Rng;
-use sha2::Sha256;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use zeroize::Zeroize;
 
 static LOOKING_GLASS: Emoji<'_, '_> = Emoji("🔍 ", "");
 static ROCKET: Emoji<'_, '_> = Emoji("🚀 ", "");
@@ -127,103 +120,12 @@ fn main() {
     }
 }
 
-fn encrypt_key(key_bytes: &[u8; 32], password: &str) -> Result<String, String> {
-    let mut rng = rand::thread_rng();
-
-    let mut salt = [0u8; 16];
-    rng.fill(&mut salt);
-
-    let mut derived: [u8; 32] = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), &salt, 100_000);
-
-    let mut nonce_bytes = [0u8; 12];
-    rng.fill(&mut nonce_bytes);
-
-    let key = Key::<Aes256Gcm>::from_slice(&derived);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, key_bytes.as_ref())
-        .map_err(|_| "Error cifrando la clave.".to_string())?;
-
-    let mut output = Vec::with_capacity(16 + 12 + ciphertext.len());
-    output.extend_from_slice(&salt);
-    output.extend_from_slice(&nonce_bytes);
-    output.extend_from_slice(&ciphertext);
-
-    derived.zeroize();
-
-    Ok(hex::encode(output))
-}
-
 fn prompt_password(prompt: &str) -> Result<String, String> {
     print!("{}", prompt);
     let _ = std::io::stdout().flush();
     let password = rpassword::read_password()
         .map_err(|e| format!("Error leyendo contraseña: {}", e))?;
     Ok(password)
-}
-
-fn generate_keypair() -> Result<(String, String), String> {
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-
-    let signing_key = SigningKey::from_bytes(&bytes);
-    let verifying_key = signing_key.verifying_key();
-
-    let private_hex = hex::encode(signing_key.to_bytes());
-    let public_hex = hex::encode(verifying_key.to_bytes());
-
-    Ok((private_hex, public_hex))
-}
-
-fn generate_and_save_keypair(path: &Path) -> Result<(String, String), String> {
-    // Generar par de claves Ed25519 para firma automática
-    let (priv_hex, pub_hex) = generate_keypair()?;
-
-    // Solicitar contraseña para cifrar la clave privada
-    let mut password = match std::env::var("EZER_INIT_PASSWORD") {
-        Ok(p) => p,
-        Err(_) => prompt_password("🔐 Contraseña para proteger la clave de firma: ")?,
-    };
-    let confirm = match std::env::var("EZER_INIT_PASSWORD") {
-        Ok(_) => password.clone(),
-        Err(_) => prompt_password("🔐 Confirma la contraseña: ")?,
-    };
-
-    if password != confirm {
-        return Err("Las contraseñas no coinciden.".to_string());
-    }
-
-    let private_key_bytes = hex::decode(&priv_hex)
-        .map_err(|_| "Error decodificando clave privada.".to_string())?;
-    let mut key_arr = [0u8; 32];
-    key_arr.copy_from_slice(&private_key_bytes);
-
-    let encrypted = encrypt_key(&key_arr, &password)?;
-    key_arr.zeroize();
-    password.zeroize();
-
-    let key_path = path.join(".ezer-key");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    
-    options.open(&key_path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, encrypted.as_bytes()))
-        .map_err(|e| format!("No se pudo guardar la clave cifrada en {}: {}", key_path.display(), e))?;
-
-    // Guardar clave pública como referencia
-    fs::write(path.join(".ezer-key.pub"), &pub_hex)
-        .map_err(|e| format!("No se pudo guardar la clave pública: {}", e))?;
-
-    println!("{} Claves guardadas en {}", style("✓").green(), path.display());
-    Ok((priv_hex, pub_hex))
 }
 
 fn init_plugin(name: &str) -> Result<(), String> {
@@ -383,8 +285,6 @@ fn main(event: PluginEvent) -> i32 {
     fs::write(path.join("plugin.png"), &placeholder_png)
         .map_err(|e| format!("No se pudo escribir plugin.png: {}", e))?;
 
-    let (_priv_hex, _pub_hex) = generate_and_save_keypair(&path)?;
-
     println!(
         "{} {} Plugin {} listo para desarrollar!",
         ROCKET,
@@ -393,10 +293,6 @@ fn main(event: PluginEvent) -> i32 {
     );
     println!("Prueba ejecutando: {} {}", style("cd").cyan(), name);
     println!("Luego: {} build", style("ezer").cyan());
-    println!(
-        "{} La clave privada está cifrada con contraseña.",
-        style("🔐").bold()
-    );
 
     Ok(())
 }
@@ -652,13 +548,11 @@ fn publish_plugin(
     // Si no hay sesión o falla, pedir login
     if session_cookies.is_empty() {
         let email = prompt("📧 Correo electrónico: ")?;
-        let mut password = prompt_password("🔑 Contraseña: ")?;
+        let password = prompt_password("🔑 Contraseña: ")?;
 
         let login_body = serde_json::json!({"correo": email, "clave": &password});
         let login_json = serde_json::to_string(&login_body)
             .map_err(|_| "Error serializando login.".to_string())?;
-
-        password.zeroize();
 
         let login_url = format!("{}/api/v1/auth/login", base);
         println!("  → Iniciando sesión...");
