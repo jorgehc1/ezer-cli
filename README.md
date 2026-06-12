@@ -101,6 +101,27 @@ ezer dev --port 8080
 
 ---
 
+### `ezer examples`
+
+Muestra ejemplos de plugins disponibles para aprender:
+
+```bash
+# Listar todos los ejemplos
+ezer examples
+
+# Ver un ejemplo específico
+ezer examples 01_dashboard_metricas
+```
+
+Ejemplos disponibles:
+- `01_dashboard_metricas` — Dashboard con métricas, charts y tablas
+- `02_monitor_sla` — Monitor de SLA con alertas y eventos
+- `03_exportador_datos` — Exportación de datos a CSV
+- `04_reportes_programados` — Reportes automáticos con cron
+- `05_hub_integraciones` — Integraciones con OAuth (Google, Slack, GitHub)
+
+---
+
 ### `ezer publish`
 
 Publica el plugin en un servidor EzerDesk:

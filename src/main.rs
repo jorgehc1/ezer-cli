@@ -30,6 +30,9 @@ enum Commands {
     Init {
         /// Nombre del plugin
         name: String,
+        /// Usar un ejemplo como plantilla
+        #[arg(short, long)]
+        example: Option<String>,
     },
     /// Compila y firma el plugin a WebAssembly (wasm32-unknown-unknown)
     Build,
@@ -102,13 +105,18 @@ enum Commands {
         #[arg(short, long)]
         server: Option<String>,
     },
+    /// Muestra ejemplos de plugins disponibles
+    Examples {
+        /// Nombre del ejemplo a copiar (opcional)
+        name: Option<String>,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Init { name } => init_plugin(&name),
+        Commands::Init { name, example } => init_plugin(&name, example),
         Commands::Build => build_plugin(),
         Commands::Dev { port } => dev_server(port),
         Commands::Publish { server, precio, es_pago, activo, imagen } => publish_plugin(server, precio, es_pago, activo, imagen),
@@ -116,6 +124,7 @@ fn main() {
         Commands::Approve { plugin_id, server, slug } => approve_plugin(plugin_id, server, slug),
         Commands::Reject { plugin_id, server, motivo } => reject_plugin(plugin_id, server, motivo),
         Commands::Pending { server } => list_pending(server),
+        Commands::Examples { name } => show_examples(name),
     };
 
     if let Err(msg) = result {
@@ -1064,6 +1073,83 @@ fn read_session(session_path: &Path) -> Result<String, String> {
             .map_err(|e| format!("No se pudo leer sesión: {}", e))
     } else {
         Err("No hay sesión guardada. Ejecuta 'ezer publish' primero para autenticarte.".to_string())
+    }
+}
+
+// ── Examples Command ─────────────────────────────────────────────────────────
+
+fn show_examples(name: Option<String>) -> Result<(), String> {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    
+    if !examples_dir.exists() {
+        return Err("No se encontró el directorio de ejemplos.".to_string());
+    }
+    
+    match name {
+        Some(example_name) => {
+            // Buscar ejemplo por nombre o prefijo
+            let entries: Vec<_> = fs::read_dir(&examples_dir)
+                .map_err(|e| format!("Error leyendo directorio: {}", e))?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+                .collect();
+            
+            let matching = entries.iter().find(|e| {
+                e.path().file_stem()
+                    .and_then(|s| s.to_str())
+                    .map_or(false, |s| s == &example_name || s.starts_with(&example_name))
+            });
+            
+            if let Some(entry) = matching {
+                let content = fs::read_to_string(entry.path())
+                    .map_err(|e| format!("Error leyendo ejemplo: {}", e))?;
+                println!("{}", content);
+                Ok(())
+            } else {
+                println!("{} Ejemplos disponibles:", style("📚").bold());
+                list_examples(&examples_dir)?;
+                Err(format!("No se encontró el ejemplo '{}'", example_name))
+            }
+        }
+        None => {
+            // Listar todos los ejemplos
+            println!("{} Ejemplos de Plugins EzerDesk", style("📚").bold());
+            println!();
+            list_examples(&examples_dir)?;
+            println!();
+            println!("{} Para ver un ejemplo: ezer examples <nombre>", style("💡").cyan());
+            println!("{} Ejemplo: ezer examples 01_dashboard", style("💡").cyan());
+            Ok(())
+        }
+    }
+}
+
+fn list_examples(examples_dir: &Path) -> Result<(), String> {
+    let entries: Vec<_> = fs::read_dir(examples_dir)
+        .map_err(|e| format!("Error leyendo directorio: {}", e))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+        .collect();
+    
+    for entry in entries {
+        let path = entry.path();
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?");
+        let description = get_example_description(name);
+        println!("  {} {} - {}", style("•").green(), style(name).cyan(), description);
+    }
+    Ok(())
+}
+
+fn get_example_description(name: &str) -> String {
+    match name {
+        "01_dashboard_metricas" => "Dashboard con métricas, charts y tablas".to_string(),
+        "02_monitor_sla" => "Monitor de SLA con alertas y eventos".to_string(),
+        "03_exportador_datos" => "Exportación de datos a CSV".to_string(),
+        "04_reportes_programados" => "Reportes automáticos con cron".to_string(),
+        "05_hub_integraciones" => "Integraciones con OAuth (Google, Slack, GitHub)".to_string(),
+        _ => "Ejemplo de plugin".to_string(),
     }
 }
 
