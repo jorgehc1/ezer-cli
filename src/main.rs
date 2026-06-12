@@ -141,12 +141,12 @@ fn prompt_password(prompt: &str) -> Result<String, String> {
     Ok(password)
 }
 
-fn init_plugin(name: &str) -> Result<(), String> {
+fn init_plugin(name: &str, example: Option<String>) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("No se pudo leer el directorio actual: {}", e))?;
-    init_plugin_at(&cwd, name)
+    init_plugin_at(&cwd, name, example)
 }
 
-fn init_plugin_at(base: &Path, name: &str) -> Result<(), String> {
+fn init_plugin_at(base: &Path, name: &str, example: Option<String>) -> Result<(), String> {
     println!(
         "{} {} Creando nuevo plugin: {}...",
         SPARKLES,
@@ -192,18 +192,54 @@ getrandom = {{ version = "0.2", features = ["js"] }}
     fs::write(path.join("Cargo.toml"), cargo_toml)
         .map_err(|e| format!("No se pudo escribir Cargo.toml: {}", e))?;
 
-    let lib_rs = r#"use ezerdesk_sdk as sdk;
+    let lib_rs = match example {
+        Some(example_name) => {
+            // Buscar y usar el ejemplo como plantilla
+            let examples_dir = env!("CARGO_MANIFEST_DIR");
+            let example_path = Path::new(examples_dir).join("examples").join(format!("{}.rs", example_name));
+            
+            if !example_path.exists() {
+                // Buscar por prefijo
+                let examples_dir = Path::new(examples_dir).join("examples");
+                let entries: Vec<_> = fs::read_dir(&examples_dir)
+                    .map_err(|e| format!("Error leyendo directorio de ejemplos: {}", e))?
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
+                    .collect();
+                
+                let matching = entries.iter().find(|e| {
+                    e.path().file_stem()
+                        .and_then(|s| s.to_str())
+                        .map_or(false, |s| s.starts_with(&example_name))
+                });
+                
+                match matching {
+                    Some(entry) => {
+                        let content = fs::read_to_string(entry.path())
+                            .map_err(|e| format!("Error leyendo ejemplo: {}", e))?;
+                        println!("  {} Usando ejemplo: {}", style("✓").green(), 
+                            entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or("?"));
+                        content
+                    }
+                    None => {
+                        return Err(format!("No se encontró el ejemplo '{}'. Usa 'ezer examples' para ver los disponibles.", example_name));
+                    }
+                }
+            } else {
+                let content = fs::read_to_string(&example_path)
+                    .map_err(|e| format!("Error leyendo ejemplo: {}", e))?;
+                println!("  {} Usando ejemplo: {}", style("✓").green(), example_name);
+                content
+            }
+        }
+        None => {
+            // Usar template por defecto
+            r#"use ezerdesk_sdk as sdk;
 use sdk::prelude::*;
 
 #[sdk::main]
 fn main(event: PluginEvent) -> i32 {
     match event {
-        // ════════════════════════════════════════════════════════════════
-        //  1. SIDEBAR — Menú de navegación lateral
-        //  ════════════════════════════════════════════════════════════════
-        //  Define cómo aparece tu plugin en el menú lateral.
-        //  📍 category: "operaciones" | "administracion" | "sistema"
-        //  ════════════════════════════════════════════════════════════════
         PluginEvent::GetMetadata => {
             let meta = PluginMetadata::new()
                 .nav_item(NavItem::new("dashboard", "Mi Plugin", "rocket-line")
@@ -215,9 +251,6 @@ fn main(event: PluginEvent) -> i32 {
             sdk::to_host_response(&meta);
         }
 
-        // ════════════════════════════════════════════════════════════════
-        //  2. PÁGINA DEL MÓDULO — Contenido al hacer clic en el menú
-        //  ════════════════════════════════════════════════════════════════
         PluginEvent::PageRequest { page_id } => {
             match page_id.as_str() {
                 "dashboard" => {
@@ -231,13 +264,6 @@ fn main(event: PluginEvent) -> i32 {
             }
         }
 
-        // ════════════════════════════════════════════════════════════════
-        //  3. CONFIGURACIÓN — Gestión → Plugins → ⚙️
-        //  ════════════════════════════════════════════════════════════════
-        //  📍 "plugin_settings" → modal de ajustes
-        //  📍 "dashboard_widget" → Dashboard
-        //  📍 "ticket_detail" → vista del ticket
-        //  ════════════════════════════════════════════════════════════════
         PluginEvent::GetUiFragments { location } => {
             match location.as_str() {
                 "plugin_settings" => {
@@ -252,41 +278,23 @@ fn main(event: PluginEvent) -> i32 {
             }
         }
 
-        // ════════════════════════════════════════════════════════════════
-        //  4. ACCIONES — Botones y formularios
-        //  ════════════════════════════════════════════════════════════════
         PluginEvent::PluginAction { action, data } => {
             sdk::log(&format!("Acción '{}' con datos: {:?}", action, data));
             sdk::respond_ok("Procesado");
         }
 
-        // ════════════════════════════════════════════════════════════════
-        //  5. EVENTOS DEL SISTEMA
-        //  ════════════════════════════════════════════════════════════════
-        //  TicketCreated, TicketStatusChanged, CommentAdded, etc.
-        //  Usa sdk::kv_set_val() / sdk::kv_get_val() para persistir.
-        //  ════════════════════════════════════════════════════════════════
         PluginEvent::TicketCreated(ticket) => {
             sdk::log(&format!("Ticket creado: {}", ticket.asunto));
         }
 
-        // ════════════════════════════════════════════════════════════════
-        //  6. CONSULTAS AL SISTEMA — Obtener datos del host
-        //  ════════════════════════════════════════════════════════════════
-        //  Tipos: query::tickets(), query::agents(), query::departments()
-        //  Uso:
-        //    let tickets = sdk::query::tickets().limit(10).all();
-        //    match tickets {
-        //        Ok(list) => sdk::log(&format!("{} tickets", list.len())),
-        //        Err(e) => sdk::log(&format!("Error: {:?}", e)),
-        //    }
-        //  ════════════════════════════════════════════════════════════════
         _ => {}
     }
 
     0
 }
-"#;
+"#.to_string()
+        }
+    };
     fs::write(src.join("lib.rs"), lib_rs)
         .map_err(|e| format!("No se pudo escribir src/lib.rs: {}", e))?;
 
