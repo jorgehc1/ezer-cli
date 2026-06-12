@@ -64,6 +64,8 @@ enum Commands {
         #[arg(short, long)]
         imagen: Option<String>,
     },
+    /// Genera un par de claves (.ezer-key y .ezer-key.pub) en el directorio actual
+    KeysGen,
 }
 
 fn main() {
@@ -74,6 +76,13 @@ fn main() {
         Commands::Build => build_plugin(),
         Commands::Dev { port } => dev_server(port),
         Commands::Publish { server, precio, es_pago, imagen } => publish_plugin(server, precio, es_pago, imagen),
+        Commands::KeysGen => {
+            let cwd = std::env::current_dir().map_err(|e| format!("No se pudo leer el directorio actual: {}", e));
+            match cwd {
+                Ok(dir) => generate_and_save_keypair(&dir).map(|_| ()),
+                Err(e) => Err(e),
+            }
+        }
     };
 
     if let Err(msg) = result {
@@ -160,6 +169,54 @@ fn generate_keypair() -> Result<(String, String), String> {
     let public_hex = hex::encode(verifying_key.to_bytes());
 
     Ok((private_hex, public_hex))
+}
+
+fn generate_and_save_keypair(path: &Path) -> Result<(String, String), String> {
+    // Generar par de claves Ed25519 para firma automática
+    let (priv_hex, pub_hex) = generate_keypair()?;
+
+    // Solicitar contraseña para cifrar la clave privada
+    let mut password = match std::env::var("EZER_INIT_PASSWORD") {
+        Ok(p) => p,
+        Err(_) => prompt_password("🔐 Contraseña para proteger la clave de firma: ")?,
+    };
+    let confirm = match std::env::var("EZER_INIT_PASSWORD") {
+        Ok(_) => password.clone(),
+        Err(_) => prompt_password("🔐 Confirma la contraseña: ")?,
+    };
+
+    if password != confirm {
+        return Err("Las contraseñas no coinciden.".to_string());
+    }
+
+    let private_key_bytes = hex::decode(&priv_hex)
+        .map_err(|_| "Error decodificando clave privada.".to_string())?;
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&private_key_bytes);
+
+    let encrypted = encrypt_key(&key_arr, &password)?;
+    key_arr.zeroize();
+    password.zeroize();
+
+    let key_path = path.join(".ezer-key");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    
+    options.open(&key_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, encrypted.as_bytes()))
+        .map_err(|e| format!("No se pudo guardar la clave cifrada en {}: {}", key_path.display(), e))?;
+
+    // Guardar clave pública como referencia
+    fs::write(path.join(".ezer-key.pub"), &pub_hex)
+        .map_err(|e| format!("No se pudo guardar la clave pública: {}", e))?;
+
+    println!("{} Claves guardadas en {}", style("✓").green(), path.display());
+    Ok((priv_hex, pub_hex))
 }
 
 fn init_plugin(name: &str) -> Result<(), String> {
@@ -319,48 +376,7 @@ fn main(event: PluginEvent) -> i32 {
     fs::write(path.join("plugin.png"), &placeholder_png)
         .map_err(|e| format!("No se pudo escribir plugin.png: {}", e))?;
 
-    // Generar par de claves Ed25519 para firma automática
-    let (priv_hex, pub_hex) = generate_keypair()?;
-
-    // Solicitar contraseña para cifrar la clave privada
-    let mut password = match std::env::var("EZER_INIT_PASSWORD") {
-        Ok(p) => p,
-        Err(_) => prompt_password("🔐 Contraseña para proteger la clave de firma: ")?,
-    };
-    let confirm = match std::env::var("EZER_INIT_PASSWORD") {
-        Ok(_) => password.clone(),
-        Err(_) => prompt_password("🔐 Confirma la contraseña: ")?,
-    };
-
-    if password != confirm {
-        return Err("Las contraseñas no coinciden.".to_string());
-    }
-
-    let private_key_bytes = hex::decode(&priv_hex)
-        .map_err(|_| "Error decodificando clave privada.".to_string())?;
-    let mut key_arr = [0u8; 32];
-    key_arr.copy_from_slice(&private_key_bytes);
-
-    let encrypted = encrypt_key(&key_arr, &password)?;
-    key_arr.zeroize();
-    password.zeroize();
-
-    let key_path = path.join(".ezer-key");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    
-    options.open(&key_path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, encrypted.as_bytes()))
-        .map_err(|e| format!("No se pudo guardar la clave cifrada en {}: {}", key_path.display(), e))?;
-
-    // Guardar clave pública como referencia
-    fs::write(path.join(".ezer-key.pub"), &pub_hex)
-        .map_err(|e| format!("No se pudo guardar la clave pública: {}", e))?;
+    let (_priv_hex, _pub_hex) = generate_and_save_keypair(&path)?;
 
     println!(
         "{} {} Plugin {} listo para desarrollar!",
@@ -588,17 +604,34 @@ fn publish_plugin(
     // Leer nombre y versión desde Cargo.toml
     let (plugin_name, plugin_version) = read_plugin_manifest(&cwd)?;
 
-    // Leer .wasm
+    // Obtener ruta del WASM y firma
     let wasm_path = get_wasm_path(&cwd)?;
-    let wasm_bytes = fs::read(&wasm_path)
-        .map_err(|e| format!("No se pudo leer .wasm: {}", e))?;
-
-    // Leer .sig (firma)
     let sig_path = wasm_path.with_extension("sig");
-    let firma = if sig_path.exists() {
+
+    // Leer clave pública
+    let pub_key_path = cwd.join(".ezer-key.pub");
+    if !pub_key_path.exists() {
+        println!(
+            "{} {} No se encontró clave de firma para publicar.",
+            style("⚠️").bold(),
+            style("Advertencia:").yellow()
+        );
+        print!("   ¿Deseas generar un nuevo par de claves (.ezer-key y .ezer-key.pub) ahora? (s/n): ");
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_ok()
+            && input.trim().eq_ignore_ascii_case("s")
+        {
+            let _ = generate_and_save_keypair(&cwd)?;
+            println!("  → Compilando y firmando el plugin con la nueva clave...");
+            let _ = build_plugin_at(&cwd)?;
+        }
+    }
+
+    let clave_publica = if pub_key_path.exists() {
         Some(
-            fs::read_to_string(&sig_path)
-                .map_err(|e| format!("No se pudo leer .sig: {}", e))?
+            fs::read_to_string(&pub_key_path)
+                .map_err(|e| format!("No se pudo leer .ezer-key.pub: {}", e))?
                 .trim()
                 .to_string(),
         )
@@ -606,12 +639,13 @@ fn publish_plugin(
         None
     };
 
-    // Leer clave pública
-    let pub_key_path = cwd.join(".ezer-key.pub");
-    let clave_publica = if pub_key_path.exists() {
+    // Leer .sig y .wasm después de una potencial compilación y firma interactiva
+    let wasm_bytes = fs::read(&wasm_path)
+        .map_err(|e| format!("No se pudo leer .wasm: {}", e))?;
+    let firma = if sig_path.exists() {
         Some(
-            fs::read_to_string(&pub_key_path)
-                .map_err(|e| format!("No se pudo leer .ezer-key.pub: {}", e))?
+            fs::read_to_string(&sig_path)
+                .map_err(|e| format!("No se pudo leer .sig: {}", e))?
                 .trim()
                 .to_string(),
         )
@@ -1011,29 +1045,6 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
         );
         let wasm_path = get_wasm_path(cwd)?;
 
-        // Firmar automáticamente
-        match read_signing_key(cwd) {
-            Ok(key_hex) => {
-                sign_wasm_with_key(&wasm_path, &key_hex)?;
-                println!(
-                    "{} {} Plugin firmado automáticamente.",
-                    style("🔐").bold(),
-                    style("Firma:").green()
-                );
-            }
-            Err(_) => {
-                println!(
-                    "{} {} No se encontró clave de firma. El plugin no está firmado.",
-                    style("⚠️").bold(),
-                    style("Advertencia:").yellow()
-                );
-                println!(
-                    "   Para generar una clave: {}",
-                    style("ezer init nuevo-plugin && cp nuevo-plugin/.ezer-key .").dim()
-                );
-            }
-        }
-
         // Optimizar WASM post-compilación
         let original_size = fs::metadata(&wasm_path).map(|m| m.len()).unwrap_or(0);
 
@@ -1060,6 +1071,49 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
                     style("❌").bold(),
                     e
                 );
+            }
+        }
+
+        // Firmar automáticamente
+        match read_signing_key(cwd) {
+            Ok(key_hex) => {
+                sign_wasm_with_key(&wasm_path, &key_hex)?;
+                println!(
+                    "{} {} Plugin firmado automáticamente.",
+                    style("🔐").bold(),
+                    style("Firma:").green()
+                );
+            }
+            Err(_) => {
+                println!(
+                    "{} {} No se encontró clave de firma.",
+                    style("⚠️").bold(),
+                    style("Advertencia:").yellow()
+                );
+                print!("   ¿Deseas generar un nuevo par de claves (.ezer-key y .ezer-key.pub) en este proyecto? (s/n): ");
+                let _ = std::io::stdout().flush();
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_ok()
+                    && input.trim().eq_ignore_ascii_case("s")
+                {
+                    match generate_and_save_keypair(cwd) {
+                        Ok(_) => {
+                            if let Ok(key_hex) = read_signing_key(cwd) {
+                                let _ = sign_wasm_with_key(&wasm_path, &key_hex);
+                                println!(
+                                    "{} {} Plugin firmado automáticamente con la nueva clave.",
+                                    style("🔐").bold(),
+                                    style("Firma:").green()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            println!("   {} Error al generar claves: {}", CROSS_MARK, e);
+                        }
+                    }
+                } else {
+                    println!("   El plugin no será firmado.");
+                }
             }
         }
 
