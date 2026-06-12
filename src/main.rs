@@ -3,7 +3,7 @@ use aes_gcm::aead::Aead;
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use console::{style, Emoji};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use indicatif::{ProgressBar, ProgressStyle};
 use pbkdf2::pbkdf2_hmac_array;
 use rand::Rng;
@@ -64,8 +64,6 @@ enum Commands {
         #[arg(short, long)]
         imagen: Option<String>,
     },
-    /// Genera un par de claves (.ezer-key y .ezer-key.pub) en el directorio actual
-    KeysGen,
     /// Envía un plugin para revisión (cambia estado a "pendiente")
     Submit {
         /// ID del plugin a enviar para revisión
@@ -117,13 +115,6 @@ fn main() {
         Commands::Build => build_plugin(),
         Commands::Dev { port } => dev_server(port),
         Commands::Publish { server, precio, es_pago, imagen } => publish_plugin(server, precio, es_pago, imagen),
-        Commands::KeysGen => {
-            let cwd = std::env::current_dir().map_err(|e| format!("No se pudo leer el directorio actual: {}", e));
-            match cwd {
-                Ok(dir) => generate_and_save_keypair(&dir).map(|_| ()),
-                Err(e) => Err(e),
-            }
-        }
         Commands::Submit { plugin_id, server } => submit_plugin(plugin_id, server),
         Commands::Approve { plugin_id, server, slug } => approve_plugin(plugin_id, server, slug),
         Commands::Reject { plugin_id, server, motivo } => reject_plugin(plugin_id, server, motivo),
@@ -163,35 +154,6 @@ fn encrypt_key(key_bytes: &[u8; 32], password: &str) -> Result<String, String> {
     derived.zeroize();
 
     Ok(hex::encode(output))
-}
-
-fn decrypt_key(encrypted_hex: &str, password: &str) -> Result<[u8; 32], String> {
-    let data = hex::decode(encrypted_hex)
-        .map_err(|e| format!("Formato de clave cifrada inválido: {}", e))?;
-
-    if data.len() < 28 {
-        return Err("Archivo de clave demasiado corto.".to_string());
-    }
-
-    let salt = &data[0..16];
-    let nonce_bytes = &data[16..28];
-    let ciphertext = &data[28..];
-
-    let mut derived: [u8; 32] = pbkdf2_hmac_array::<Sha256, 32>(password.as_bytes(), salt, 100_000);
-
-    let key = Key::<Aes256Gcm>::from_slice(&derived);
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(nonce_bytes);
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| "Contraseña incorrecta.".to_string())?;
-
-    derived.zeroize();
-
-    let mut result = [0u8; 32];
-    result.copy_from_slice(&plaintext);
-    Ok(result)
 }
 
 fn prompt_password(prompt: &str) -> Result<String, String> {
@@ -444,47 +406,6 @@ fn build_plugin() -> Result<(), String> {
     build_plugin_at(&cwd)
 }
 
-fn read_signing_key(cwd: &Path) -> Result<String, String> {
-    let key_path = cwd.join(".ezer-key");
-    let pub_key_path = cwd.join(".ezer-key.pub");
-
-    if !key_path.exists() {
-        return match std::env::var("PLUGIN_SIGN_KEY") {
-            Ok(key) => {
-                // Si la variable de entorno tiene la clave, podría estar en hex directo
-                // (para CI/CD sin interacción)
-                Ok(key.trim().to_string())
-            }
-            Err(_) => Err(format!(
-                "No se encontró {}.\n\
-                 También puedes usar la variable PLUGIN_SIGN_KEY.",
-                key_path.display()
-            )),
-        };
-    }
-
-    // Leer clave cifrada
-    let encrypted = fs::read_to_string(&key_path)
-        .map_err(|e| format!("No se pudo leer {}: {}", key_path.display(), e))?;
-    let encrypted = encrypted.trim().to_string();
-
-    // El .ezer-key.pub es solo referencia, podemos leerlo para mostrar info
-    let _pub_info = if pub_key_path.exists() {
-        fs::read_to_string(&pub_key_path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    // Pedir contraseña (o usar PLUGIN_SIGN_PASS para CI/CD)
-    let mut password = match std::env::var("PLUGIN_SIGN_PASS") {
-        Ok(p) => p,
-        Err(_) => prompt_password("🔐 Contraseña de la clave de firma: ")?,
-    };
-    let key_bytes = decrypt_key(&encrypted, &password)?;
-    password.zeroize();
-    Ok(hex::encode(key_bytes))
-}
-
 fn dev_server(port: u16) -> Result<(), String> {
     let cwd = std::env::current_dir()
         .map_err(|e| format!("No se pudo leer el directorio actual: {}", e))?;
@@ -649,54 +570,12 @@ fn publish_plugin(
     // Leer nombre y versión desde Cargo.toml
     let (plugin_name, plugin_version) = read_plugin_manifest(&cwd)?;
 
-    // Obtener ruta del WASM y firma
+    // Obtener ruta del WASM
     let wasm_path = get_wasm_path(&cwd)?;
-    let sig_path = wasm_path.with_extension("sig");
 
-    // Leer clave pública
-    let pub_key_path = cwd.join(".ezer-key.pub");
-    if !pub_key_path.exists() {
-        println!(
-            "{} {} No se encontró clave de firma para publicar.",
-            style("⚠️").bold(),
-            style("Advertencia:").yellow()
-        );
-        print!("   ¿Deseas generar un nuevo par de claves (.ezer-key y .ezer-key.pub) ahora? (s/n): ");
-        let _ = std::io::stdout().flush();
-        let mut input = String::new();
-        if std::io::stdin().read_line(&mut input).is_ok()
-            && input.trim().eq_ignore_ascii_case("s")
-        {
-            let _ = generate_and_save_keypair(&cwd)?;
-            println!("  → Compilando y firmando el plugin con la nueva clave...");
-            let _ = build_plugin_at(&cwd)?;
-        }
-    }
-
-    let clave_publica = if pub_key_path.exists() {
-        Some(
-            fs::read_to_string(&pub_key_path)
-                .map_err(|e| format!("No se pudo leer .ezer-key.pub: {}", e))?
-                .trim()
-                .to_string(),
-        )
-    } else {
-        None
-    };
-
-    // Leer .sig y .wasm después de una potencial compilación y firma interactiva
+    // Leer WASM
     let wasm_bytes = fs::read(&wasm_path)
         .map_err(|e| format!("No se pudo leer .wasm: {}", e))?;
-    let firma = if sig_path.exists() {
-        Some(
-            fs::read_to_string(&sig_path)
-                .map_err(|e| format!("No se pudo leer .sig: {}", e))?
-                .trim()
-                .to_string(),
-        )
-    } else {
-        None
-    };
 
     // Codificar WASM a base64
     let codigo_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
@@ -706,15 +585,7 @@ fn publish_plugin(
         "codigo_wasm_base64": codigo_b64,
         "precio": precio,
         "es_pago": es_pago,
-        "nombre": plugin_name,
-        "version": plugin_version,
     });
-    if let Some(ref sig) = firma {
-        upload_body["firma"] = serde_json::json!(sig);
-    }
-    if let Some(ref pub_key) = clave_publica {
-        upload_body["clave_publica"] = serde_json::json!(pub_key);
-    }
 
     // Procesar imagen — por defecto busca plugin.png, o la ruta indicada con --image
     let img_path = imagen.clone().unwrap_or_else(|| {
@@ -761,9 +632,6 @@ fn publish_plugin(
     );
     println!("  Servidor: {}", base);
     println!("  Archivo:  {}", wasm_path.display());
-    if let Some(ref s) = firma {
-        println!("  Firma:    {}...", &s[..16]);
-    }
     println!();
 
     // ── Autenticación ──────────────────────────────────────────────────────
@@ -888,54 +756,6 @@ fn publish_plugin(
         if status.is_success() { Ok(text) } else { Err(text) }
     };
 
-    // ── Registrar clave pública de la organización ────────────────────────
-    let pub_key_url = format!("{}/api/v1/auth/public-key", base);
-    let reg_key_url = format!("{}/api/v1/auth/register-key", base);
-
-    match clave_publica {
-        Some(local_key) => {
-            let existing_key =
-                auth_request(&pub_key_url, "GET", "").ok().and_then(
-                    |resp| {
-                        serde_json::from_str::<serde_json::Value>(&resp).ok()
-                            .and_then(|j| j["clave_publica"].as_str().map(|s| s.to_string()))
-                    },
-                );
-
-            match existing_key {
-                Some(ref server_key) if server_key == &local_key => {
-                    println!("  ✓ Clave pública ya registrada, usando existente.");
-                }
-                Some(_) => {
-                    println!(
-                        "  ⚠ La clave pública local difiere de la registrada en el servidor."
-                    );
-                    print!("  ¿Actualizar clave pública? (s/n): ");
-                    let _ = std::io::stdout().flush();
-                    let mut input = String::new();
-                    let should_update = std::io::stdin().read_line(&mut input).is_ok()
-                        && input.trim().eq_ignore_ascii_case("s");
-                    if should_update {
-                        let reg_body =
-                            serde_json::json!({"clave_publica": local_key}).to_string();
-                        auth_request(&reg_key_url, "POST", &reg_body)?;
-                        println!("  ✓ Clave pública actualizada.");
-                    }
-                }
-                None => {
-                    println!("  → Registrando clave pública de la organización...");
-                    let reg_body =
-                        serde_json::json!({"clave_publica": local_key}).to_string();
-                    auth_request(&reg_key_url, "POST", &reg_body)?;
-                    println!("  ✓ Clave pública registrada.");
-                }
-            }
-        }
-        None => {
-            println!("  ⚠ No se encontró clave pública local (.ezer-key.pub). La firma no podrá verificarse.");
-        }
-    }
-
     // ── Subir plugin ───────────────────────────────────────────────────────
     let upload_url = format!("{}/api/v1/plugins/upload", base);
     println!("  → Subiendo plugin...");
@@ -1004,41 +824,6 @@ fn get_wasm_path(cwd: &Path) -> Result<std::path::PathBuf, String> {
         }
     }
     Err("No se encontró el archivo .wasm compilado.".to_string())
-}
-
-fn sign_wasm_with_key(wasm_path: &Path, key_hex: &str) -> Result<(), String> {
-
-    let key_bytes = hex::decode(key_hex.trim())
-        .map_err(|e| format!("La clave privada no es un hex válido: {}", e))?;
-
-    if key_bytes.len() != 32 {
-        return Err("La clave privada debe tener 32 bytes (64 caracteres hex).".to_string());
-    }
-
-    let key_array: [u8; 32] = key_bytes[..32]
-        .try_into()
-        .map_err(|_| "Error al convertir la clave.".to_string())?;
-
-    let signing_key = SigningKey::from_bytes(&key_array);
-
-    let wasm_bytes = fs::read(wasm_path)
-        .map_err(|e| format!("No se pudo leer el .wasm: {}", e))?;
-
-    let signature = signing_key.sign(&wasm_bytes);
-    let signature_hex = hex::encode(signature.to_bytes());
-
-    // Guardar la firma en un archivo junto al .wasm
-    let sig_path = wasm_path.with_extension("sig");
-    fs::write(&sig_path, &signature_hex)
-        .map_err(|e| format!("No se pudo guardar la firma: {}", e))?;
-
-    println!(
-        "{} Plugin firmado correctamente.",
-        style("🔐").bold()
-    );
-    println!("  {} Archivo:      {}", style("💾").bold(), sig_path.display());
-
-    Ok(())
 }
 
 fn build_plugin_at(cwd: &Path) -> Result<(), String> {
@@ -1116,49 +901,6 @@ fn build_plugin_at(cwd: &Path) -> Result<(), String> {
                     style("❌").bold(),
                     e
                 );
-            }
-        }
-
-        // Firmar automáticamente
-        match read_signing_key(cwd) {
-            Ok(key_hex) => {
-                sign_wasm_with_key(&wasm_path, &key_hex)?;
-                println!(
-                    "{} {} Plugin firmado automáticamente.",
-                    style("🔐").bold(),
-                    style("Firma:").green()
-                );
-            }
-            Err(_) => {
-                println!(
-                    "{} {} No se encontró clave de firma.",
-                    style("⚠️").bold(),
-                    style("Advertencia:").yellow()
-                );
-                print!("   ¿Deseas generar un nuevo par de claves (.ezer-key y .ezer-key.pub) en este proyecto? (s/n): ");
-                let _ = std::io::stdout().flush();
-                let mut input = String::new();
-                if std::io::stdin().read_line(&mut input).is_ok()
-                    && input.trim().eq_ignore_ascii_case("s")
-                {
-                    match generate_and_save_keypair(cwd) {
-                        Ok(_) => {
-                            if let Ok(key_hex) = read_signing_key(cwd) {
-                                let _ = sign_wasm_with_key(&wasm_path, &key_hex);
-                                println!(
-                                    "{} {} Plugin firmado automáticamente con la nueva clave.",
-                                    style("🔐").bold(),
-                                    style("Firma:").green()
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            println!("   {} Error al generar claves: {}", CROSS_MARK, e);
-                        }
-                    }
-                } else {
-                    println!("   El plugin no será firmado.");
-                }
             }
         }
 
