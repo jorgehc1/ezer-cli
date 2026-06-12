@@ -1179,6 +1179,7 @@ fn get_example_description(name: &str) -> String {
         "25_generador_facturas" => "Generación de facturas y envío por email".to_string(),
         "26_portal_clientes" => "Portal self-service para clientes".to_string(),
         "27_api_integration_hub" => "Hub de integraciones con servicios externos".to_string(),
+        "28_integracion_phone_sms" => "Integración con Phone/SMS".to_string(),
         _ => "Ejemplo de plugin".to_string(),
     }
 }

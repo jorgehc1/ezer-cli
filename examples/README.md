@@ -163,3 +163,7 @@ sdk::http_request(&req)
 ### 27. API Integration Hub (`27_api_integration_hub.rs`)
 **Features:** HTTP, OAuth, Webhooks, KV store, Table
 **Demuestra:** Conexión con servicios externos, webhooks, integraciones
+
+### 28. Integración Phone/SMS (`28_integracion_phone_sms.rs`)
+**Features:** SMS sending, HTTP, KV store, Events, Table
+**Demuestra:** Notificaciones SMS, creación de tickets desde SMS, comandos SMS
