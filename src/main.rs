@@ -1024,26 +1024,12 @@ fn sign_wasm_with_key(wasm_path: &Path, key_hex: &str) -> Result<(), String> {
     let wasm_bytes = fs::read(wasm_path)
         .map_err(|e| format!("No se pudo leer el .wasm: {}", e))?;
 
-    // Generar timestamp (Unix seconds, 8 bytes big-endian)
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let timestamp_bytes = timestamp.to_be_bytes();
-
-    // Firmar: timestamp ++ wasm_bytes
-    let mut payload = Vec::with_capacity(8 + wasm_bytes.len());
-    payload.extend_from_slice(&timestamp_bytes);
-    payload.extend_from_slice(&wasm_bytes);
-
-    let signature = signing_key.sign(&payload);
+    let signature = signing_key.sign(&wasm_bytes);
     let signature_hex = hex::encode(signature.to_bytes());
-    let timestamp_hex = hex::encode(timestamp_bytes);
 
-    // Guardar como timestamp_hex:signature_hex
-    let sig_content = format!("{}:{}", timestamp_hex, signature_hex);
+    // Guardar la firma en un archivo junto al .wasm
     let sig_path = wasm_path.with_extension("sig");
-    fs::write(&sig_path, &sig_content)
+    fs::write(&sig_path, &signature_hex)
         .map_err(|e| format!("No se pudo guardar la firma: {}", e))?;
 
     println!(
@@ -1051,7 +1037,6 @@ fn sign_wasm_with_key(wasm_path: &Path, key_hex: &str) -> Result<(), String> {
         style("🔐").bold()
     );
     println!("  {} Archivo:      {}", style("💾").bold(), sig_path.display());
-    println!("  {} Timestamp:    Unix {}", style("⏰").bold(), timestamp);
 
     Ok(())
 }
