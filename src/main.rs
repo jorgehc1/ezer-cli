@@ -246,7 +246,7 @@ fn init_plugin_at(base: &Path, name: &str) -> Result<(), String> {
         r#"[package]
 name = "{name}"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
@@ -1181,7 +1181,7 @@ mod tests {
 
         let cargo = fs::read_to_string(plugin.join("Cargo.toml")).unwrap();
         assert!(cargo.contains(r#"name = "test-plugin""#));
-        assert!(cargo.contains(r#"edition = "2021""#));
+        assert!(cargo.contains(r#"edition = "2024""#));
         assert!(cargo.contains(&format!(r#"ezerdesk-sdk"#)));
 
         let lib = fs::read_to_string(plugin.join("src/lib.rs")).unwrap();
