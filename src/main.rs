@@ -53,8 +53,8 @@ enum Commands {
         #[arg(short = 'p', long)]
         es_pago: bool,
 
-        /// Publicar activado (default: true)
-        #[arg(long, default_value = "true")]
+        /// Publicar activado (default: false)
+        #[arg(long, default_value = "false", action = clap::ArgAction::Set)]
         activo: bool,
 
         /// Ruta a una imagen (default: busca plugin.png en el directorio actual)
