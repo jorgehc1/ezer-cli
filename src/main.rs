@@ -110,6 +110,47 @@ enum Commands {
         /// Nombre del ejemplo a copiar (opcional)
         name: Option<String>,
     },
+    /// Ejecuta los tests del plugin
+    Test,
+    /// Despliega el plugin a producción
+    Deploy {
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+    },
+    /// Muestra los logs del plugin en tiempo real
+    Logs {
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+
+        /// Número de líneas a mostrar (default: 50)
+        #[arg(short, long, default_value = "50")]
+        lines: u32,
+    },
+    /// Inicia una consola interactiva para el plugin
+    Console {
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+    },
+    /// Publica el plugin en el marketplace
+    Marketplace {
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+    },
+    /// Genera documentación del plugin
+    Docs,
+    /// Despublica un plugin del marketplace
+    Withdraw {
+        /// ID del plugin a despublicar
+        plugin_id: String,
+
+        /// URL del servidor (default: http://localhost:8000)
+        #[arg(short, long)]
+        server: Option<String>,
+    },
 }
 
 fn main() {
@@ -125,11 +166,190 @@ fn main() {
         Commands::Reject { plugin_id, server, motivo } => reject_plugin(plugin_id, server, motivo),
         Commands::Pending { server } => list_pending(server),
         Commands::Examples { name } => show_examples(name),
+        Commands::Test => test_plugin(),
+        Commands::Deploy { server } => deploy_plugin(server),
+        Commands::Logs { server, lines } => show_logs(server, lines),
+        Commands::Console { server } => start_console(server),
+        Commands::Marketplace { server } => publish_to_marketplace(server),
+        Commands::Docs => generate_docs(),
+        Commands::Withdraw { plugin_id, server } => withdraw_from_marketplace(plugin_id, server),
     };
 
     if let Err(msg) = result {
         eprintln!("{} {}", CROSS_MARK, style(msg).red());
         std::process::exit(1);
+    }
+}
+
+// ── Plugin Management Commands ───────────────────────────────────────────────
+
+fn test_plugin() -> Result<(), String> {
+    println!("{} Ejecutando tests del plugin...", style("🧪").bold());
+    
+    let output = Command::new("cargo")
+        .args(["test"])
+        .output()
+        .map_err(|e| format!("Error ejecutando tests: {}", e))?;
+    
+    if output.status.success() {
+        println!("{} Todos los tests pasaron exitosamente.", style("✓").green());
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Tests fallaron:\n{}", stderr))
+    }
+}
+
+fn deploy_plugin(server: Option<String>) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+    
+    println!("{} Desplegando plugin a producción...", style("🚀").bold());
+    println!("  Servidor: {}", base);
+    
+    // Primero compilar
+    build_plugin()?;
+    
+    // Luego publicar con activo=true
+    publish_plugin(Some(base.to_string()), 0, false, true, None)?;
+    
+    println!("{} Plugin desplegado exitosamente!", style("✓").green());
+    Ok(())
+}
+
+fn show_logs(server: Option<String>, lines: u32) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+    
+    println!("{} Mostrando últimos {} logs...", style("📋").bold(), lines);
+    println!("  Servidor: {}", base);
+    
+    // TODO: Implementar conexión WebSocket para logs en tiempo real
+    println!("  (Funcionalidad en desarrollo)");
+    Ok(())
+}
+
+fn start_console(server: Option<String>) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+    
+    println!("{} Consola interactiva del plugin", style("💻").bold());
+    println!("  Servidor: {}", base);
+    println!("  Escribe 'help' para ver comandos disponibles");
+    println!("  Escribe 'exit' para salir");
+    println!();
+    
+    // TODO: Implementar consola interactiva
+    println!("  (Funcionalidad en desarrollo)");
+    Ok(())
+}
+
+fn publish_to_marketplace(server: Option<String>) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+    
+    println!("{} Publicando plugin en marketplace...", style("🏪").bold());
+    println!("  Servidor: {}", base);
+    
+    // Primero compilar y publicar
+    build_plugin()?;
+    publish_plugin(Some(base.to_string()), 0, false, false, None)?;
+    
+    // Luego enviar para revisión
+    // TODO: Obtener el ID del plugin recién creado
+    println!("  Plugin publicado. Use 'ezer submit <plugin_id>' para enviar a revisión.");
+    Ok(())
+}
+
+fn generate_docs() -> Result<(), String> {
+    println!("{} Generando documentación del plugin...", style("📝").bold());
+    
+    // Generar documentación básica
+    let docs = r#"# Documentación del Plugin
+
+## Uso
+1. Instalar el plugin desde el marketplace
+2. Activar el plugin desde Gestión → Plugins
+3. Acceder desde el menú lateral
+
+## Eventos Soportados
+- GetMetadata: Retorna metadatos del plugin
+- PageRequest: Renderiza páginas del plugin
+- PluginAction: Maneja acciones del usuario
+
+## Widgets Disponibles
+- Card, Text, Button, Input, Select, Switch
+- Table, Chart, Badge, Icon, Divider, Modal
+- NumberInput, DateInput
+"#;
+    
+    std::fs::write("PLUGIN_DOCS.md", docs)
+        .map_err(|e| format!("Error escribiendo documentación: {}", e))?;
+    
+    println!("{} Documentación generada: PLUGIN_DOCS.md", style("✓").green());
+    Ok(())
+}
+
+fn withdraw_from_marketplace(plugin_id: String, server: Option<String>) -> Result<(), String> {
+    let base_url = server.unwrap_or_else(|| {
+        std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    });
+    let base = base_url.trim_end_matches('/');
+    
+    println!("{} Despublicando plugin del marketplace...", style("📤").bold());
+    println!("  Plugin ID: {}", plugin_id);
+    println!("  Servidor: {}", base);
+    
+    // Autenticarse
+    let session_path = std::env::current_dir()
+        .map_err(|e| format!("No se pudo leer directorio: {}", e))?
+        .join(".ezer-session");
+    
+    let cookies = if session_path.exists() {
+        fs::read_to_string(&session_path)
+            .map(|c| c.trim().to_string())
+            .unwrap_or_default()
+    } else {
+        return Err("No hay sesión guardada. Ejecuta 'ezer publish' primero.".to_string());
+    };
+    
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(false)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+    
+    let resp = client.post(format!("{}/api/v1/plugins/{}/withdraw", base, plugin_id))
+        .header("Content-Type", "application/json")
+        .header("x-ezerdesk-request", "true")
+        .header("Cookie", &cookies)
+        .body("{}".to_string())
+        .send()
+        .map_err(|e| format!("Error HTTP: {}", e))?;
+    
+    let status = resp.status();
+    let text = resp.text().map_err(|_| "Error leyendo respuesta".to_string())?;
+    
+    if status.is_success() {
+        println!("{} Plugin despublicado del marketplace.", style("✓").green());
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(msg) = json.get("mensaje").and_then(|m| m.as_str()) {
+                println!("  {}", msg);
+            }
+            if let Some(note) = json.get("nota").and_then(|n| n.as_str()) {
+                println!("  {}", note);
+            }
+        }
+        Ok(())
+    } else {
+        Err(format!("Error {}: {}", status, text))
     }
 }
 
@@ -1180,6 +1400,7 @@ fn get_example_description(name: &str) -> String {
         "26_portal_clientes" => "Portal self-service para clientes".to_string(),
         "27_api_integration_hub" => "Hub de integraciones con servicios externos".to_string(),
         "28_integracion_phone_sms" => "Integración con Phone/SMS".to_string(),
+        "29_inventario_custom" => "Gestión de inventario con modelos de datos custom".to_string(),
         _ => "Ejemplo de plugin".to_string(),
     }
 }
