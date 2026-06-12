@@ -135,3 +135,31 @@ sdk::http_request(&req)
 | Analytics | 1, 2, 4 |
 | Reports | 4 |
 | Integrations | 5 |
+
+### 21. Monitor de Red SNMP (`21_monitor_red_snmp.rs`)
+**Features:** HTTP requests, Charts, Table, KV store, Cron
+**Demuestra:** Monitoreo de dispositivos de red via SNMP proxy/API
+
+### 22. Receptor de Traps SNMP (`22_receptor_traps_snmp.rs`)
+**Features:** HTTP, KV store, Events, Table, Charts
+**Demuestra:** Recepción y procesamiento de traps SNMP via webhook
+
+### 23. Bot de Telegram para Soporte (`23_bot_telegram_soporte.rs`)
+**Features:** HTTP, KV store, Events, Chat queries, Tables
+**Demuestra:** Bot de Telegram que responde consultas de soporte
+
+### 24. Notificador de Telegram (`24_notificador_telegram.rs`)
+**Features:** HTTP, KV store, Events, Charts, Cron
+**Demuestra:** Sistema de notificaciones automáticas via Telegram
+
+### 25. Generador de Facturas (`25_generador_facturas.rs`)
+**Features:** Templates, HTTP, KV store, Email, Table, NumberInput
+**Demuestra:** Generación de facturas, envío por email, historial
+
+### 26. Portal de Clientes (`26_portal_clientes.rs`)
+**Features:** Auth, Queries, Forms, Real-time, Table, KV store
+**Demuestra:** Experiencia de cliente completa, self-service
+
+### 27. API Integration Hub (`27_api_integration_hub.rs`)
+**Features:** HTTP, OAuth, Webhooks, KV store, Table
+**Demuestra:** Conexión con servicios externos, webhooks, integraciones
