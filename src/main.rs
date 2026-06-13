@@ -120,6 +120,9 @@ enum Commands {
     },
     /// Muestra los logs del plugin en tiempo real
     Logs {
+        /// ID del plugin a monitorear
+        plugin_id: String,
+
         /// URL del servidor (default: http://localhost:8000)
         #[arg(short, long)]
         server: Option<String>,
@@ -168,7 +171,7 @@ fn main() {
         Commands::Examples { name } => show_examples(name),
         Commands::Test => test_plugin(),
         Commands::Deploy { server } => deploy_plugin(server),
-        Commands::Logs { server, lines } => show_logs(server, lines),
+        Commands::Logs { plugin_id, server, lines } => show_logs(plugin_id, server, lines),
         Commands::Console { server } => start_console(server),
         Commands::Marketplace { server } => publish_to_marketplace(server),
         Commands::Docs => generate_docs(),
@@ -219,18 +222,161 @@ fn deploy_plugin(server: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn show_logs(server: Option<String>, lines: u32) -> Result<(), String> {
+fn show_logs(plugin_id: String, server: Option<String>, lines: u32) -> Result<(), String> {
     let base_url = server.unwrap_or_else(|| {
         std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
     });
     let base = base_url.trim_end_matches('/');
-    
-    println!("{} Mostrando últimos {} logs...", style("📋").bold(), lines);
+
+    println!("{} Monitoreando logs del plugin {}...", style("📋").bold(), style(&plugin_id).cyan());
     println!("  Servidor: {}", base);
-    
-    // TODO: Implementar conexión WebSocket para logs en tiempo real
-    println!("  (Funcionalidad en desarrollo)");
-    Ok(())
+    println!("  Líneas históricas: {}", lines);
+    println!();
+
+    // Leer sesión
+    let session_path = std::env::current_dir()
+        .map_err(|e| format!("No se pudo leer directorio: {}", e))?
+        .join(".ezer-session");
+    let cookies = read_session(&session_path)?;
+
+    // Obtener ticket WebSocket
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(false)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+
+    let ticket_resp = client
+        .post(format!("{}/api/v1/auth/ws-ticket", base))
+        .header("Content-Type", "application/json")
+        .header("x-ezerdesk-request", "true")
+        .header("Cookie", &cookies)
+        .body("{}".to_string())
+        .send()
+        .map_err(|e| format!("Error obteniendo ticket WS: {}", e))?;
+
+    let ticket_json: serde_json::Value = serde_json::from_str(
+        &ticket_resp
+            .text()
+            .map_err(|_| "Error leyendo ticket".to_string())?,
+    )
+    .map_err(|_| "Error parseando ticket".to_string())?;
+
+    let ticket = ticket_json["ticket"]
+        .as_str()
+        .ok_or("No se recibió ticket WebSocket")?;
+
+    // Construir URL WebSocket
+    let ws_url = format!(
+        "ws://{}/api/v1/plugins/{}/logs/ws?ticket={}",
+        base.trim_start_matches("http://").trim_start_matches("https://"),
+        plugin_id,
+        ticket
+    );
+
+    println!("{} Conectando...", style("⏳").yellow());
+
+    // Conectar y recibir
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("Error creando runtime: {}", e))?;
+
+    rt.block_on(async {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+        let (ws_stream, _) = connect_async(&ws_url)
+            .await
+            .map_err(|e| format!("Error conectando WebSocket: {}", e))?;
+
+        let (_, mut read) = ws_stream.split();
+
+        println!(
+            "{} Logs en tiempo real (Ctrl+C para salir):",
+            style("✓").green()
+        );
+        println!();
+
+        while let Some(msg) = read.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if let Ok(events) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // Si es un array (logs históricos)
+                        if let Some(arr) = events.as_array() {
+                            for entry in arr {
+                                print_log_entry(entry);
+                            }
+                        } else {
+                            // Evento individual
+                            print_log_entry(&events);
+                        }
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    println!(
+                        "{} Conexión cerrada por el servidor.",
+                        style("⚠").yellow()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("{} Error WebSocket: {}", style("❌").bold(), e);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok::<(), String>(())
+    })
+}
+
+fn print_log_entry(event: &serde_json::Value) {
+    let tipo = event["tipo"].as_str().unwrap_or("unknown");
+
+    match tipo {
+        "plugin_log_historico" | "plugin_log_creado" => {
+            let datos = &event["datos"];
+            let timestamp = datos["creado_en"].as_i64().unwrap_or(0);
+            let nivel = datos["nivel"].as_str().unwrap_or("info");
+            let mensaje = datos["mensaje"].as_str().unwrap_or("");
+            let fuel = datos["fuel_consumido"].as_i64().unwrap_or(0);
+            let memory = datos["memoria_usada"].as_i64().unwrap_or(0);
+
+            // Timestamp formateado
+            let dt = chrono::DateTime::from_timestamp(timestamp, 0)
+                .map(|d| d.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "??:??:??".to_string());
+
+            // Color según nivel
+            let nivel_colored = match nivel {
+                "ERROR" | "error" => style(nivel).red().bold(),
+                "WARN" | "warn" => style(nivel).yellow(),
+                "INFO" | "info" => style(nivel).green(),
+                _ => style(nivel).dim(),
+            };
+
+            let fuel_str = if fuel > 0 {
+                format!(" fuel:{}", fuel)
+            } else {
+                String::new()
+            };
+            let mem_str = if memory > 0 {
+                format!(" mem:{}", memory)
+            } else {
+                String::new()
+            };
+
+            println!(
+                "  {} {} {}{}{}",
+                style(dt).dim(),
+                nivel_colored,
+                style(mensaje).white(),
+                style(fuel_str).dim(),
+                style(mem_str).dim(),
+            );
+        }
+        _ => {
+            // Otros eventos ignorados
+        }
+    }
 }
 
 fn start_console(server: Option<String>) -> Result<(), String> {
