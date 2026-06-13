@@ -133,6 +133,9 @@ enum Commands {
     },
     /// Inicia una consola interactiva para el plugin
     Console {
+        /// ID del plugin a consolar
+        plugin_id: String,
+
         /// URL del servidor (default: http://localhost:8000)
         #[arg(short, long)]
         server: Option<String>,
@@ -172,7 +175,7 @@ fn main() {
         Commands::Test => test_plugin(),
         Commands::Deploy { server } => deploy_plugin(server),
         Commands::Logs { plugin_id, server, lines } => show_logs(plugin_id, server, lines),
-        Commands::Console { server } => start_console(server),
+        Commands::Console { plugin_id, server } => start_console(plugin_id, server),
         Commands::Marketplace { server } => publish_to_marketplace(server),
         Commands::Docs => generate_docs(),
         Commands::Withdraw { plugin_id, server } => withdraw_from_marketplace(plugin_id, server),
@@ -379,21 +382,230 @@ fn print_log_entry(event: &serde_json::Value) {
     }
 }
 
-fn start_console(server: Option<String>) -> Result<(), String> {
+fn start_console(plugin_id: String, server: Option<String>) -> Result<(), String> {
     let base_url = server.unwrap_or_else(|| {
         std::env::var("EZER_SERVER").unwrap_or_else(|_| "http://localhost:8000".to_string())
     });
     let base = base_url.trim_end_matches('/');
-    
-    println!("{} Consola interactiva del plugin", style("💻").bold());
+
+    println!(
+        "{} ezerdesk plugin console v{}",
+        style("💻").bold(),
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("  Plugin: {}", style(&plugin_id).cyan());
     println!("  Servidor: {}", base);
-    println!("  Escribe 'help' para ver comandos disponibles");
-    println!("  Escribe 'exit' para salir");
     println!();
-    
-    // TODO: Implementar consola interactiva
-    println!("  (Funcionalidad en desarrollo)");
-    Ok(())
+
+    // Leer sesión
+    let session_path = std::env::current_dir()
+        .map_err(|e| format!("No se pudo leer directorio: {}", e))?
+        .join(".ezer-session");
+    let cookies = read_session(&session_path)?;
+
+    // Obtener ticket WebSocket
+    let client = reqwest::blocking::Client::builder()
+        .cookie_store(false)
+        .build()
+        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+
+    let ticket_resp = client
+        .post(format!("{}/api/v1/auth/ws-ticket", base))
+        .header("Content-Type", "application/json")
+        .header("x-ezerdesk-request", "true")
+        .header("Cookie", &cookies)
+        .body("{}".to_string())
+        .send()
+        .map_err(|e| format!("Error obteniendo ticket WS: {}", e))?;
+
+    let ticket_json: serde_json::Value = serde_json::from_str(
+        &ticket_resp
+            .text()
+            .map_err(|_| "Error leyendo ticket".to_string())?,
+    )
+    .map_err(|_| "Error parseando ticket".to_string())?;
+
+    let ticket = ticket_json["ticket"]
+        .as_str()
+        .ok_or("No se recibió ticket WebSocket")?;
+
+    // Construir URL WebSocket
+    let ws_url = format!(
+        "ws://{}/api/v1/plugins/{}/console/ws?ticket={}",
+        base.trim_start_matches("http://").trim_start_matches("https://"),
+        plugin_id,
+        ticket
+    );
+
+    println!("{} Conectando...", style("⏳").yellow());
+
+    // Conectar y REPL
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("Error creando runtime: {}", e))?;
+
+    rt.block_on(async {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+        let (ws_stream, _) = connect_async(&ws_url)
+            .await
+            .map_err(|e| format!("Error conectando WebSocket: {}", e))?;
+
+        let (mut write, mut read) = ws_stream.split();
+
+        // Leer welcome banner
+        if let Some(Ok(Message::Text(welcome))) = read.next().await {
+            if let Ok(welcome_json) = serde_json::from_str::<serde_json::Value>(&welcome) {
+                let fuel = welcome_json["fuel_limit"].as_i64().unwrap_or(0);
+                let memory = welcome_json["memory_limit"].as_i64().unwrap_or(0);
+                println!(
+                    "{}  Fuel: {} | Memory: {}MB",
+                    style("✓").green(),
+                    format_number(fuel),
+                    memory / 1_048_576
+                );
+            }
+        }
+
+        println!(
+            "{} Escribe JSON para enviar al plugin. 'help' para comandos. 'exit' para salir.",
+            style("→").green()
+        );
+        println!();
+
+        // REPL loop
+        loop {
+            // Prompt
+            print!("{} ", style("ezer>").green().bold());
+            use std::io::Write;
+            std::io::stdout()
+                .flush()
+                .map_err(|e| format!("Error flush: {}", e))?;
+
+            // Leer input de stdin en un thread separado
+            let input = tokio::task::spawn_blocking(|| {
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|e| format!("Error leyendo stdin: {}", e))?;
+                Ok::<String, String>(line)
+            })
+            .await
+            .map_err(|e| format!("Error en thread: {}", e))?
+            ?;
+
+            let input = input.trim().to_string();
+
+            match input.as_str() {
+                "exit" | "quit" => {
+                    println!("{} Hasta luego!", style("👋").dim());
+                    break;
+                }
+                "help" => {
+                    println!("  Comandos disponibles:");
+                    println!("    <json>              Enviar comando al plugin WASM");
+                    println!("    help                Mostrar esta ayuda");
+                    println!("    exit                Salir de la consola");
+                    println!();
+                    println!("  Ejemplos:");
+                    println!(
+                        "    {}",
+                        style(r#"{"event_type":"get_metadata"}"#).dim()
+                    );
+                    println!(
+                        "    {}",
+                        style(r#"{"event_type":"action","action":"ping"}"#).dim()
+                    );
+                    println!();
+                }
+                "" => continue,
+                cmd => {
+                    // Enviar comando al servidor
+                    let msg = serde_json::json!({
+                        "tipo": "comando",
+                        "input": cmd
+                    });
+                    write
+                        .send(Message::Text(msg.to_string()))
+                        .await
+                        .map_err(|e| format!("Error enviando comando: {}", e))?;
+
+                    // Esperar respuesta
+                    while let Some(Ok(Message::Text(text))) = read.next().await {
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&text) {
+                            match event["tipo"].as_str() {
+                                Some("resultado") => {
+                                    let output = event["output"].as_str().unwrap_or("");
+                                    let fuel = event["fuel_consumed"].as_i64().unwrap_or(0);
+                                    let memory = event["memory_used"].as_i64().unwrap_or(0);
+
+                                    let dt = chrono::Local::now().format("%H:%M:%S");
+
+                                    println!(
+                                        "  {} {} {} {} {}",
+                                        style(dt).dim(),
+                                        style("OK").green(),
+                                        style(output).white(),
+                                        if fuel > 0 {
+                                            style(format!("fuel:{}", fuel)).dim()
+                                        } else {
+                                            style(String::new()).dim()
+                                        },
+                                        if memory > 0 {
+                                            style(format!("mem:{}", memory)).dim()
+                                        } else {
+                                            style(String::new()).dim()
+                                        },
+                                    );
+                                    break;
+                                }
+                                Some("error") => {
+                                    let mensaje = event["mensaje"].as_str().unwrap_or("unknown");
+                                    let dt = chrono::Local::now().format("%H:%M:%S");
+                                    println!(
+                                        "  {} {} {}",
+                                        style(dt).dim(),
+                                        style("ERR").red().bold(),
+                                        style(mensaje).red(),
+                                    );
+                                    break;
+                                }
+                                Some("pong") => {
+                                    println!("  {} {}", style("pong").dim(), style("(ok)").green());
+                                    break;
+                                }
+                                Some("log") => {
+                                    let nivel = event["nivel"].as_str().unwrap_or("info");
+                                    let mensaje = event["mensaje"].as_str().unwrap_or("");
+                                    let nivel_style = match nivel {
+                                        "ERROR" | "error" => style(nivel).red(),
+                                        "WARN" | "warn" => style(nivel).yellow(),
+                                        _ => style(nivel).green(),
+                                    };
+                                    println!("  {} {}", nivel_style, style(mensaje).dim());
+                                    // Seguir esperando resultado
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok::<(), String>(())
+    })
+}
+
+fn format_number(n: i64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 fn publish_to_marketplace(server: Option<String>) -> Result<(), String> {
@@ -864,6 +1076,33 @@ fn publish_plugin(
     // Codificar WASM a base64
     let codigo_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
 
+    // Calcular firma HMAC-SHA256 del WASM
+    let plugin_secret = std::env::var("EZER_PLUGIN_SECRET")
+        .unwrap_or_else(|_| {
+            // Intentar leer de archivo .ezer-secret en el directorio del plugin
+            let secret_path = cwd.join(".ezer-secret");
+            fs::read_to_string(&secret_path)
+                .map(|c| c.trim().to_string())
+                .unwrap_or_default()
+        });
+
+    let firma = if !plugin_secret.is_empty() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(plugin_secret.as_bytes())
+            .map_err(|e| format!("Error creando HMAC: {}", e))?;
+        mac.update(&wasm_bytes);
+        let result = mac.finalize();
+        let firma_hex = hex::encode(result.into_bytes());
+        println!("  {} Firma HMAC calculada", style("🔐").bold());
+        Some(firma_hex)
+    } else {
+        println!("  {} Sin PLUGIN_SECRET, plugin sin firmar", style("⚠").yellow());
+        None
+    };
+
     // Construir JSON del upload
     let mut upload_body = serde_json::json!({
         "codigo_wasm_base64": codigo_b64,
@@ -871,6 +1110,11 @@ fn publish_plugin(
         "es_pago": es_pago,
         "activo": activo,
     });
+
+    // Agregar firma si existe
+    if let Some(firma_hex) = firma {
+        upload_body["firma"] = serde_json::json!(firma_hex);
+    }
 
     // Procesar imagen — por defecto busca plugin.png, o la ruta indicada con --image
     let img_path = imagen.clone().unwrap_or_else(|| {

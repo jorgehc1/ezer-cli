@@ -614,6 +614,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "hmac",
  "indicatif",
  "notify",
  "pbkdf2",
