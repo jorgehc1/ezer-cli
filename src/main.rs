@@ -1401,6 +1401,7 @@ fn get_example_description(name: &str) -> String {
         "27_api_integration_hub" => "Hub de integraciones con servicios externos".to_string(),
         "28_integracion_phone_sms" => "Integración con Phone/SMS".to_string(),
         "29_inventario_custom" => "Gestión de inventario con modelos de datos custom".to_string(),
+        "30_integracion_phone_call" => "Integración con Phone/Call (llamadas)".to_string(),
         _ => "Ejemplo de plugin".to_string(),
     }
 }
