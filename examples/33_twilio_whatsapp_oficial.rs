@@ -34,6 +34,25 @@ struct SentMessage {
 #[sdk::main]
 fn main(event: PluginEvent) -> i32 {
     match event {
+        PluginEvent::SmsInbound { id_organizacion: _, from, to, body } => {
+            sdk::log(&format!("SMS entrante de {} a {}: {}", from, to, body));
+
+            // Store incoming message in KV store
+            let counter = get_msg_counter() + 1;
+            let msg = SentMessage {
+                id: counter,
+                to: from.clone(),
+                body: body.clone(),
+                timestamp: sdk::now(),
+                status: "recibido".to_string(),
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                sdk::kv_set_val(&format!("twilio_msg_{}", counter % 1000), &json);
+            }
+            sdk::kv_set_val(KV_MSG_COUNTER, &counter.to_string());
+            save_contact(&from);
+        }
+
         PluginEvent::GetMetadata => {
             let meta = PluginMetadata::new()
                 .nav_item(NavItem::new("twilio_send", "WhatsApp Twilio", "whatsapp-line")
