@@ -305,29 +305,40 @@ fn render_security_settings() {
 
 fn render_plugin_settings() {
     let plugins = vec![
-        ("dashboard_metricas", "Dashboard de Metricas", true),
-        ("monitor_sla", "Monitor de SLA", true),
-        ("gestor_tickets", "Gestor de Tickets", true),
-        ("buscador_avanzado", "Buscador Avanzado", false),
-        ("chatbot_inteligente", "Chatbot IA", false),
+        ("dashboard_metricas", "Dashboard de Metricas", true, "OneTime", "--"),
+        ("monitor_sla", "Monitor de SLA", true, "OneTime", "--"),
+        ("gestor_tickets", "Gestor de Tickets", true, "Recurring", "2025-03-15"),
+        ("buscador_avanzado", "Buscador Avanzado", false, "OneTime", "--"),
+        ("chatbot_inteligente", "Chatbot IA", true, "Recurring", "2025-02-28"),
     ];
 
     sdk::respond(sdk::widgets![
         sdk::card("Gestion de Plugins", vec![
-            sdk::text("Administra los plugins instalados en el sistema", "info"),
+            sdk::text(
+                "Los plugins pueden ser de compra unica (OneTime) o suscripcion recurrente (Recurring). \
+                 Las suscripciones se renuevan automaticamente cada mes desde tu saldo EzerDesk.",
+                "info"
+            ),
             sdk::divider(),
 
             sdk::card("Plugins Instalados", vec![
                 sdk::table(
-                    vec!["Plugin", "Nombre", "Estado", "Accion"],
-                    plugins.iter().map(|(id, name, active)| {
+                    vec!["Plugin", "Nombre", "Estado", "Tipo", "Vencimiento", "Accion"],
+                    plugins.iter().map(|(id, name, active, tipo, vto)| {
                         vec![
                             id,
                             name,
                             if *active { "Activo" } else { "Inactivo" },
+                            tipo,
+                            vto,
                             if *active { "Desactivar" } else { "Activar" },
                         ]
                     }).collect(),
+                ),
+                sdk::text(
+                    "Los plugins Recurring se renuevan via saldo_credito. Si no hay saldo suficiente, \
+                     la licencia se desactiva automaticamente.",
+                    "warning"
                 ),
             ]),
 
@@ -339,21 +350,38 @@ fn render_plugin_settings() {
                     ("marketplace", "Marketplace"),
                     ("local", "Archivo Local"),
                 ]),
+                sdk::select("pricing_type", "Tipo de Precio", vec![
+                    ("OneTime", "Compra Unica"),
+                    ("Recurring", "Suscripcion Mensual"),
+                ]),
                 sdk::button("Instalar Plugin", "plugins", "primary"),
             ]),
 
             sdk::card("Plugins Disponibles", vec![
                 sdk::table(
-                    vec!["Plugin", "Version", "Descripcion"],
+                    vec!["Plugin", "Version", "Tipo", "Precio", "Descripcion"],
                     vec![
-                        vec!["reporte_satisfaccion", "1.0.0", "Reportes de satisfaccion del cliente"],
-                        vec!["gestor_cupones", "1.0.0", "Sistema de cupones de descuento"],
-                        vec!["integracion_email", "1.0.0", "Integracion con email"],
+                        vec!["reporte_satisfaccion", "1.0.0", "OneTime", "$29.99", "Reportes de satisfaccion del cliente"],
+                        vec!["gestor_cupones", "1.0.0", "OneTime", "$19.99", "Sistema de cupones de descuento"],
+                        vec!["integracion_email", "1.0.0", "Recurring", "$9.99/mes", "Integracion con email"],
+                        vec!["monitor_red_snmp", "2.0.0", "Recurring", "$14.99/mes", "Monitoreo SNMP de dispositivos de red"],
+                        vec!["chatbot_ia_premium", "1.5.0", "Recurring", "$49.99/mes", "Chatbot con IA avanzada y analitica"],
                     ],
                 ),
             ]),
 
             sdk::divider(),
+
+            sdk::card("Resumen de Suscripciones", vec![
+                sdk::table(
+                    vec!["Concepto", "Monto", "Periodo", "Proximo Pago"],
+                    vec![
+                        vec!["gestor_tickets", "$19.99", "Mensual", "2025-03-15"],
+                        vec!["chatbot_inteligente", "$9.99", "Mensual", "2025-02-28"],
+                        vec!["Total Suscripciones", "$29.98/mes", "", ""],
+                    ],
+                ),
+            ]),
 
             sdk::button("Exportar Configuracion", "export_config", "primary"),
         ]),
